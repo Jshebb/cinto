@@ -17,15 +17,23 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     pub max_tokens: u32,
     pub temperature: f32,
+    #[serde(default = "default_thinking_effort")]
+    pub thinking_effort: String,
+    #[serde(default = "default_stream")]
+    pub stream: bool,
     pub stop: Vec<String>,
     #[serde(default = "default_timeout_secs")]
     pub request_timeout_secs: u64,
+    #[serde(default = "default_context_window")]
+    pub context_window: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessConfig {
     pub workspace: PathBuf,
     pub allow_shell: bool,
+    #[serde(default = "default_max_tool_turns")]
+    pub max_tool_turns: u32,
     pub system_prompt: String,
     pub developer_prompt: String,
 }
@@ -36,17 +44,21 @@ impl Default for Config {
 
         Self {
             model: ModelConfig {
-                endpoint: "http://127.0.0.1:8000/v1/completions".to_string(),
+                endpoint: "http://127.0.0.1:1234".to_string(),
                 model: "openai/gpt-oss-20b".to_string(),
                 api_key_env: None,
                 max_tokens: 4096,
                 temperature: 0.2,
+                thinking_effort: default_thinking_effort(),
+                stream: default_stream(),
                 stop: vec!["<|return|>".to_string(), "<|call|>".to_string()],
                 request_timeout_secs: default_timeout_secs(),
+                context_window: default_context_window(),
             },
             harness: HarnessConfig {
                 workspace,
                 allow_shell: false,
+                max_tool_turns: default_max_tool_turns(),
                 system_prompt: "You are OpenHarness, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
                 developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel.".to_string(),
             },
@@ -93,6 +105,22 @@ impl Config {
 
 fn default_timeout_secs() -> u64 {
     600
+}
+
+fn default_context_window() -> u32 {
+    8192
+}
+
+fn default_max_tool_turns() -> u32 {
+    16
+}
+
+fn default_thinking_effort() -> String {
+    "medium".to_string()
+}
+
+fn default_stream() -> bool {
+    true
 }
 
 #[cfg(test)]

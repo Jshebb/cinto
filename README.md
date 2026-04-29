@@ -25,11 +25,14 @@ Start a local server that exposes `/v1/completions`, then run:
 cargo run
 ```
 
-The default endpoint is:
+The default endpoint is LM Studio's local server base URL:
 
 ```text
-http://127.0.0.1:8000/v1/completions
+http://127.0.0.1:1234
 ```
+
+OpenHarness normalizes that to `/v1/chat/completions`. You can still provide an
+explicit `/v1/completions` endpoint for servers that accept raw text completions.
 
 Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
 Use `/settings`, `Tab`, or `F2` to open API settings.
@@ -40,17 +43,21 @@ Create `~/.config/openharness/config.toml` or pass `--config path/to/config.toml
 
 ```toml
 [model]
-endpoint = "http://127.0.0.1:8000/v1/completions"
+endpoint = "http://127.0.0.1:1234"
 model = "openai/gpt-oss-20b"
 api_key_env = "OPENAI_API_KEY"
 max_tokens = 4096
 temperature = 0.2
+thinking_effort = "medium"
+stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600
+context_window = 8192
 
 [harness]
 workspace = "/home/you/project"
 allow_shell = false
+max_tool_turns = 16
 system_prompt = "You are OpenHarness, a local coding agent running in a terminal UI."
 developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits."
 ```
@@ -59,6 +66,10 @@ Leave `api_key_env` blank or remove it for local servers that do not need bearer
 auth. When it is set, OpenHarness reads the secret from that environment
 variable and sends it as a bearer token. The TUI saves the variable name, not the
 secret.
+
+`thinking_effort` can be `none`, `low`, `medium`, or `high`. OpenHarness sends
+it as `reasoning_effort` to compatible OpenAI-style servers. Set `stream = true`
+to render model output continuously as chunks arrive.
 
 For `gpt-oss-120b`, change `model` to the model name exposed by your local
 server and increase context/token settings on the server side.
@@ -83,6 +94,10 @@ The implemented tools are read-only:
 Editing and shell execution are deliberately gated for a later milestone so the
 harness can grow an explicit approval flow instead of mutating a workspace
 silently.
+
+If the model keeps requesting tools without answering, raise `max_tool_turns` or
+ask for a narrower step. OpenHarness returns a normal assistant message when the
+budget is exhausted instead of aborting the turn.
 
 See [docs/architecture.md](docs/architecture.md) for the design notes and next
 milestones.

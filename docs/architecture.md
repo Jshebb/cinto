@@ -37,13 +37,30 @@ Milestone 1 exposes read-only tools:
 - `functions.read_file`
 - `functions.search`
 
+Tool loops are capped by `harness.max_tool_turns`, which defaults to 16. Tool
+execution errors are returned to the model as tool output so the model can
+recover instead of crashing the UI turn.
+
 Milestone 2 should add write tools with a diff preview and a user approval step.
 Milestone 3 can add shell commands with allowlists, working-directory controls,
 and visible stdout/stderr in the TUI.
 
 ## Model Backends
 
-The default backend is any local server that offers:
+The default backend is LM Studio or any OpenAI-compatible local server. The
+default endpoint is a base URL:
+
+```text
+http://127.0.0.1:1234
+```
+
+OpenHarness expands base URLs to:
+
+```text
+POST /v1/chat/completions
+```
+
+Servers that support raw prompt completions can still be configured with:
 
 ```text
 POST /v1/completions
@@ -64,6 +81,15 @@ API credentials are configured by environment variable name rather than by
 storing the secret in TOML. This keeps the settings view useful for local and
 remote OpenAI-compatible backends without turning the config file into a secret
 store.
+
+The model client supports server-sent event streaming for OpenAI-compatible chat
+and completion endpoints. The session still owns Harmony parsing and tool-loop
+control; the UI receives assistant deltas over an internal channel and replaces
+the live draft with the parsed final/tool message once the model turn closes.
+
+Thinking effort is stored as `model.thinking_effort` and sent as
+`reasoning_effort` when it is not `none`. The UI displays the active effort in
+the header, context rail, and settings view.
 
 ## Next Milestones
 

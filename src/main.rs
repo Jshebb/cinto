@@ -2,6 +2,7 @@ mod config;
 mod harmony;
 mod model;
 mod session;
+mod theme;
 mod ui;
 
 use std::path::PathBuf;

@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::Config,
@@ -34,6 +35,13 @@ pub struct Message {
     pub channel: Option<Channel>,
     pub recipient: Option<String>,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum TurnEvent {
+    AssistantDelta(String),
+    DiscardAssistantDraft,
+    Message(Message),
 }
 
 impl Message {
@@ -119,48 +127,81 @@ impl AgentSession {
         self.prompt.render(&self.history)
     }
 
-    pub async fn send_user_message(&mut self, content: String) -> Result<Vec<Message>> {
-        self.history.push(Message::user(content));
-        self.complete_turn().await
+    pub fn estimated_prompt_tokens(&self) -> usize {
+        self.render_prompt().len() / 4
     }
 
-    async fn complete_turn(&mut self) -> Result<Vec<Message>> {
-        let mut produced = Vec::new();
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
 
-        for _ in 0..4 {
+    pub async fn send_user_message_streaming(
+        &mut self,
+        content: String,
+        event_tx: UnboundedSender<TurnEvent>,
+    ) -> Result<()> {
+        self.history.push(Message::user(content));
+        self.complete_turn_streaming(event_tx).await
+    }
+
+    async fn complete_turn_streaming(
+        &mut self,
+        event_tx: UnboundedSender<TurnEvent>,
+    ) -> Result<()> {
+        let max_tool_turns = self.config.harness.max_tool_turns.max(1);
+
+        for _ in 0..max_tool_turns {
             let prompt = self.render_prompt();
-            let completion = self.client.complete(prompt).await?;
+            let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
+            let completion = self.client.complete_streaming(prompt, delta_tx);
 
-            match parse_assistant_output(&completion) {
-                AssistantOutput::Final(text) => {
-                    let message = Message::assistant_final(text);
-                    self.history.push(message.clone());
-                    produced.push(message);
-                    return Ok(produced);
-                }
-                AssistantOutput::ToolCall {
-                    recipient,
-                    arguments,
-                } => {
-                    let call = Message::assistant_tool_call(recipient.clone(), arguments.clone());
-                    self.history.push(call.clone());
-                    produced.push(call);
+            tokio::pin!(completion);
+            loop {
+                tokio::select! {
+                    result = &mut completion => {
+                        let completion = result?;
+                        match parse_assistant_output(&completion) {
+                            AssistantOutput::Final(text) => {
+                                let message = Message::assistant_final(text);
+                                self.history.push(message.clone());
+                                let _ = event_tx.send(TurnEvent::Message(message));
+                                return Ok(());
+                            }
+                            AssistantOutput::ToolCall { recipient, arguments } => {
+                                let _ = event_tx.send(TurnEvent::DiscardAssistantDraft);
+                                let call = Message::assistant_tool_call(recipient.clone(), arguments.clone());
+                                self.history.push(call.clone());
+                                let _ = event_tx.send(TurnEvent::Message(call));
 
-                    let output = self.execute_tool(&recipient, &arguments)?;
-                    let tool = Message::tool(recipient, output);
-                    self.history.push(tool.clone());
-                    produced.push(tool);
-                }
-                AssistantOutput::Raw(text) => {
-                    let message = Message::assistant_final(text);
-                    self.history.push(message.clone());
-                    produced.push(message);
-                    return Ok(produced);
+                                let output = self
+                                    .execute_tool(&recipient, &arguments)
+                                    .unwrap_or_else(|error| format!("tool error: {error:#}"));
+                                let tool = Message::tool(recipient, output);
+                                self.history.push(tool.clone());
+                                let _ = event_tx.send(TurnEvent::Message(tool));
+                                break;
+                            }
+                            AssistantOutput::Raw(text) => {
+                                let message = Message::assistant_final(text);
+                                self.history.push(message.clone());
+                                let _ = event_tx.send(TurnEvent::Message(message));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Some(delta) = delta_rx.recv() => {
+                        let _ = event_tx.send(TurnEvent::AssistantDelta(delta));
+                    }
                 }
             }
         }
 
-        Err(anyhow!("tool loop exceeded maximum turn depth"))
+        let message = Message::assistant_final(format!(
+            "I hit the configured tool-call budget ({max_tool_turns}) before producing a final answer. Try asking for a narrower step, or raise `harness.max_tool_turns` in settings/config."
+        ));
+        self.history.push(message.clone());
+        let _ = event_tx.send(TurnEvent::Message(message));
+        Ok(())
     }
 
     fn execute_tool(&self, recipient: &str, arguments: &str) -> Result<String> {
