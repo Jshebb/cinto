@@ -4,19 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    prelude::{CrosstermBackend, Terminal},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
-};
+use ratatui::prelude::{CrosstermBackend, Terminal};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, unbounded_channel},
     task::JoinHandle,
@@ -24,8 +18,21 @@ use tokio::{
 
 use crate::{
     config::Config,
-    session::{AgentSession, Channel, Message, Role, TurnEvent},
-    theme::{BRAND_NAME, RoleKind, StatusKind, Theme, spinner_frame},
+    session::{AgentSession, Channel, Role, TurnEvent},
+    theme::{StatusKind, Theme},
+};
+
+mod commands;
+mod formatting;
+mod layout;
+mod render;
+mod settings;
+mod transcript;
+
+use self::{
+    layout::app_areas,
+    settings::{SETTINGS, SettingField, next_thinking_effort},
+    transcript::TranscriptItem,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,60 +40,6 @@ enum View {
     Chat,
     Settings,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscriptRole {
-    User,
-    Assistant,
-    Tool,
-    System,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-struct TranscriptItem {
-    role: TranscriptRole,
-    title: String,
-    body: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SettingField {
-    Endpoint,
-    Model,
-    ApiKeyEnv,
-    MaxTokens,
-    Temperature,
-    ThinkingEffort,
-    Stream,
-    Timeout,
-    ToolTurns,
-    Stop,
-    Workspace,
-    AllowShell,
-}
-
-const SETTINGS: [SettingField; 12] = [
-    SettingField::Endpoint,
-    SettingField::Model,
-    SettingField::ApiKeyEnv,
-    SettingField::MaxTokens,
-    SettingField::Temperature,
-    SettingField::ThinkingEffort,
-    SettingField::Stream,
-    SettingField::Timeout,
-    SettingField::ToolTurns,
-    SettingField::Stop,
-    SettingField::Workspace,
-    SettingField::AllowShell,
-];
-
-const COMMAND_TIPS: [(&str, &str); 4] = [
-    ("/settings", "open API settings"),
-    ("/prompt", "show Harmony prompt"),
-    ("/clear", "clear chat"),
-    ("/quit", "exit"),
-];
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
 
@@ -108,8 +61,11 @@ pub struct App {
     stream_rx: Option<UnboundedReceiver<TurnEvent>>,
     stream_item_index: Option<usize>,
     busy_since: Option<Instant>,
+    last_turn_elapsed: Option<Duration>,
     estimated_tokens: usize,
     history_len: usize,
+    todo_details: String,
+    todo_status_line: String,
     theme: Theme,
 }
 
@@ -118,6 +74,8 @@ impl App {
         let config = session.config().clone();
         let estimated_tokens = session.estimated_prompt_tokens();
         let history_len = session.history_len();
+        let todo_details = session.todo_details();
+        let todo_status_line = session.todo_status_line();
 
         Self {
             session: Some(session),
@@ -125,7 +83,7 @@ impl App {
             config_path,
             transcript: vec![TranscriptItem::system(
                 "Ready",
-                "OH! OpenHarness is ready. Type a request, /prompt, /settings, /clear, or /quit.",
+                "OH! OpenHarness is ready. Type a request, /tools, /todos, /prompt, /settings, /clear, or /quit.",
             )],
             input: String::new(),
             status: "idle".to_string(),
@@ -140,8 +98,11 @@ impl App {
             stream_rx: None,
             stream_item_index: None,
             busy_since: None,
+            last_turn_elapsed: None,
             estimated_tokens,
             history_len,
+            todo_details,
+            todo_status_line,
             theme: Theme::default(),
         }
     }
@@ -176,23 +137,15 @@ impl App {
                 } else {
                     3
                 };
-                let [header_area, body_area, input_area, footer_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(4),
-                        Constraint::Min(8),
-                        Constraint::Length(input_height),
-                        Constraint::Length(2),
-                    ])
-                    .areas(frame.area());
+                let areas = app_areas(frame.area(), input_height);
 
-                self.render_header(header_area, frame);
+                self.render_header(areas.header, frame);
                 match self.view {
-                    View::Chat => self.render_chat(body_area, frame),
-                    View::Settings => self.render_settings(body_area, frame),
+                    View::Chat => self.render_chat(areas.body, frame),
+                    View::Settings => self.render_settings(areas.body, frame),
                 }
-                self.render_input(input_area, frame);
-                self.render_footer(footer_area, frame);
+                self.render_input(areas.input, frame);
+                self.render_footer(areas.footer, frame);
             })?;
 
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
@@ -220,252 +173,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn render_header(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let view = match self.view {
-            View::Chat => "chat",
-            View::Settings => "settings",
-        };
-        let endpoint = compact(
-            &self.config.model.endpoint,
-            area.width.saturating_sub(34) as usize,
-        );
-
-        let [meta_area, logo_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(30), Constraint::Length(16)])
-            .areas(area);
-
-        let meta = Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(BRAND_NAME, self.theme.brand()),
-                Span::raw(" OpenHarness"),
-                Span::styled(format!("  {view}"), self.theme.dim_style()),
-            ]),
-            Line::from(vec![
-                Span::styled("model ", self.theme.dim_style()),
-                Span::raw(self.config.model.model.as_str()),
-                Span::styled("  think ", self.theme.dim_style()),
-                Span::raw(self.config.model.thinking_effort.as_str()),
-                Span::styled("  endpoint ", self.theme.dim_style()),
-                Span::raw(endpoint),
-            ]),
-        ]);
-        frame.render_widget(
-            meta,
-            meta_area.inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            }),
-        );
-
-        let logo = Paragraph::new(self.theme.logo_lines()).alignment(Alignment::Right);
-        frame.render_widget(
-            logo,
-            logo_area.inner(Margin {
-                vertical: 0,
-                horizontal: 1,
-            }),
-        );
-    }
-
-    fn render_chat(&mut self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let [messages_area, rail_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(48), Constraint::Length(24)])
-            .areas(area);
-
-        let messages_inner = messages_area.inner(Margin {
-            vertical: 1,
-            horizontal: 2,
-        });
-        let lines = self.transcript_lines(messages_inner.width);
-        let visible = messages_inner.height as usize;
-        let max_scroll = lines.len().saturating_sub(visible) as u16;
-        if self.follow_tail {
-            self.chat_scroll = max_scroll;
-        } else {
-            self.chat_scroll = self.chat_scroll.min(max_scroll);
-        }
-
-        let transcript = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((self.chat_scroll, 0));
-        frame.render_widget(transcript, messages_inner);
-
-        let rail = Paragraph::new(self.context_rail_lines()).wrap(Wrap { trim: false });
-        frame.render_widget(
-            rail,
-            rail_area.inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            }),
-        );
-    }
-
-    fn render_settings(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let [settings_area, help_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-            .areas(area);
-        let settings_inner = settings_area.inner(Margin {
-            vertical: 1,
-            horizontal: 2,
-        });
-
-        let mut rows = Vec::new();
-        let locked = self.is_busy();
-        for (index, field) in SETTINGS.iter().enumerate() {
-            let selected = index == self.selected_setting;
-            let editing = selected && self.setting_editor.is_some();
-            let value = if editing {
-                self.setting_editor
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                field.value(&self.config)
-            };
-            let marker = if selected { ">" } else { " " };
-            let label_style = if selected {
-                self.theme.brand()
-            } else {
-                self.theme.dim_style()
-            };
-            let value_style = if editing {
-                self.theme.status_style(StatusKind::Working)
-            } else if locked {
-                self.theme.chrome_style()
-            } else {
-                Style::default().fg(self.theme.fg)
-            };
-
-            rows.push(Line::from(vec![
-                Span::styled(format!("{marker} {:<14} ", field.label()), label_style),
-                Span::styled(value, value_style),
-            ]));
-        }
-
-        let settings = Paragraph::new(rows).wrap(Wrap { trim: false });
-        frame.render_widget(settings, settings_inner);
-
-        let path = self
-            .config_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "no config path available".to_string());
-        let lock_line = if locked {
-            "Settings are locked while a turn is running."
-        } else {
-            "Edit endpoint, model, auth env, and runtime limits here."
-        };
-        let help = Paragraph::new(vec![
-            Line::styled("API Access", self.theme.brand()),
-            Line::raw(""),
-            Line::raw(lock_line),
-            Line::raw(""),
-            Line::raw("api key env stores an environment variable name, not the secret."),
-            Line::raw(""),
-            Line::styled("Keys", self.theme.brand()),
-            Line::raw("Up/Down or j/k: select"),
-            Line::raw("Enter: edit/apply"),
-            Line::raw("Esc: cancel/back"),
-            Line::raw("Space: toggle boolean"),
-            Line::raw("s: save TOML"),
-            Line::raw("Tab/F2: chat"),
-            Line::raw(""),
-            Line::styled("Config Path", self.theme.brand()),
-            Line::raw(path),
-        ])
-        .wrap(Wrap { trim: false });
-        frame.render_widget(
-            help,
-            help_area.inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            }),
-        );
-    }
-
-    fn render_input(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let working = self.is_busy();
-        let (title, mut content, style) = match self.view {
-            View::Chat if self.is_busy() => (
-                " Input ",
-                vec![Line::raw("model is working; scroll remains available")],
-                self.theme.dim_style(),
-            ),
-            View::Chat => (
-                " Input ",
-                self.chat_input_lines(),
-                Style::default().fg(self.theme.fg),
-            ),
-            View::Settings if self.setting_editor.is_some() => (
-                " Editing Setting ",
-                vec![Line::raw(
-                    self.setting_editor
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_string(),
-                )],
-                Style::default().fg(self.theme.fg),
-            ),
-            View::Settings => (
-                " Settings Mode ",
-                vec![Line::raw("select a setting and press Enter")],
-                self.theme.dim_style(),
-            ),
-        };
-
-        if working {
-            content.insert(
-                0,
-                Line::from(vec![
-                    Span::styled(
-                        spinner_frame(self.spinner_tick),
-                        self.theme.status_style(StatusKind::Working),
-                    ),
-                    Span::styled(" Working ", self.theme.status_style(StatusKind::Working)),
-                    Span::styled(self.status.as_str(), self.theme.dim_style()),
-                ]),
-            );
-        }
-
-        let input = Paragraph::new(content)
-            .style(style)
-            .block(Block::default().title(title).borders(Borders::ALL));
-        frame.render_widget(input, area);
-    }
-
-    fn render_footer(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let [token_area, status_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .areas(area);
-        let ratio = token_ratio(self.estimated_tokens, self.config.model.context_window);
-        let token_label = format!(
-            "ctx ~{} / {}",
-            self.estimated_tokens, self.config.model.context_window
-        );
-        let gauge = Gauge::default()
-            .gauge_style(self.theme.status_style(token_status_kind(ratio)))
-            .ratio(ratio)
-            .label(token_label);
-        frame.render_widget(gauge, token_area);
-
-        let status = Paragraph::new(Line::from(vec![
-            Span::styled("Status ", self.theme.dim_style()),
-            Span::styled(
-                self.status.as_str(),
-                self.theme.status_style(self.status_kind),
-            ),
-            Span::raw("   "),
-            Span::styled("Keys ", Style::default().fg(self.theme.muted)),
-            Span::raw("Tab/F2 settings  PgUp/PgDn scroll  Ctrl-C quit"),
-        ]))
-        .alignment(Alignment::Left);
-        frame.render_widget(status, status_area);
     }
 
     async fn handle_chat_key(&mut self, code: KeyCode) -> Result<bool> {
@@ -539,6 +246,29 @@ impl App {
                 }
                 return Ok(false);
             }
+            "/tools" => {
+                if let Some(session) = &self.session {
+                    self.transcript.push(TranscriptItem::system(
+                        "Agent Tools",
+                        session.tool_details(),
+                    ));
+                } else {
+                    self.append_system(
+                        "Busy",
+                        "Tool details are unavailable while a turn is running.",
+                    );
+                }
+                self.follow_tail = true;
+                return Ok(false);
+            }
+            "/todos" => {
+                self.transcript.push(TranscriptItem::system(
+                    "Task Todos",
+                    self.todo_details.clone(),
+                ));
+                self.follow_tail = true;
+                return Ok(false);
+            }
             _ => {}
         }
 
@@ -599,6 +329,7 @@ impl App {
         self.status = "thinking".to_string();
         self.status_kind = StatusKind::Working;
         self.busy_since = Some(Instant::now());
+        self.last_turn_elapsed = None;
         self.stream_rx = Some(event_rx);
         self.stream_item_index = None;
 
@@ -645,6 +376,7 @@ impl App {
             }
         }
 
+        self.last_turn_elapsed = self.busy_since.map(|started| started.elapsed());
         self.busy_since = None;
         self.stream_rx = None;
         self.stream_item_index = None;
@@ -704,105 +436,10 @@ impl App {
             }
         }
 
-        self.transcript.push(TranscriptItem {
-            role: TranscriptRole::Assistant,
-            title: "Assistant".to_string(),
-            body: String::new(),
-        });
+        self.transcript.push(TranscriptItem::assistant_stream());
         let index = self.transcript.len() - 1;
         self.stream_item_index = Some(index);
         index
-    }
-
-    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for item in &self.transcript {
-            let role = item.role.label();
-            let style = item.role.style(&self.theme);
-            lines.push(Line::from(vec![
-                Span::styled(role, style),
-                Span::styled(format!(" {}", item.title), self.theme.dim_style()),
-            ]));
-
-            for line in item.body.lines() {
-                if line.is_empty() {
-                    lines.push(Line::raw(""));
-                } else {
-                    lines.extend(wrap_text(line, width).into_iter().map(Line::raw));
-                }
-            }
-            lines.push(Line::raw(""));
-        }
-
-        if lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        lines
-    }
-
-    fn context_rail_lines(&self) -> Vec<Line<'static>> {
-        let auth = self
-            .config
-            .model
-            .api_key_env
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("none");
-        let elapsed = self
-            .busy_since
-            .map(|started| format!("{}s", started.elapsed().as_secs()))
-            .unwrap_or_else(|| "-".to_string());
-        let state = if self.is_busy() { "running" } else { "ready" };
-
-        vec![
-            Line::styled("OH! OpenHarness", self.theme.brand()),
-            Line::raw(""),
-            Line::styled("Session", self.theme.brand()),
-            Line::raw(format!("state: {state}")),
-            Line::raw(format!("elapsed: {elapsed}")),
-            Line::raw(format!("messages: {}", self.history_len)),
-            Line::raw(format!(
-                "ctx: ~{} / {}",
-                self.estimated_tokens, self.config.model.context_window
-            )),
-            Line::raw(format!("tools: {}", self.config.harness.max_tool_turns)),
-            Line::raw(""),
-            Line::styled("Model", self.theme.brand()),
-            Line::raw(compact(&self.config.model.model, 18)),
-            Line::raw(format!("out: {}", self.config.model.max_tokens)),
-            Line::raw(format!("temp: {:.2}", self.config.model.temperature)),
-            Line::raw(format!("think: {}", self.config.model.thinking_effort)),
-            Line::raw(format!("stream: {}", self.config.model.stream)),
-            Line::raw(format!("auth: {auth}")),
-            Line::raw(""),
-            Line::styled("Commands", self.theme.brand()),
-            Line::raw("/settings"),
-            Line::raw("/prompt"),
-            Line::raw("/clear"),
-            Line::raw("/quit"),
-        ]
-    }
-
-    fn chat_input_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::raw(self.input.clone())];
-        if !self.input.starts_with('/') {
-            return lines;
-        }
-
-        let prefix = self.input.trim();
-        let matches = COMMAND_TIPS
-            .iter()
-            .filter(|(command, _)| command.starts_with(prefix))
-            .map(|(command, tip)| format!("{command} {tip}"))
-            .collect::<Vec<_>>();
-
-        let tips = if matches.is_empty() {
-            "no command matches".to_string()
-        } else {
-            matches.join("   ")
-        };
-        lines.push(Line::styled(tips, self.theme.dim_style()));
-        lines
     }
 
     fn append_system(&mut self, title: impl Into<String>, body: impl Into<String>) {
@@ -817,6 +454,8 @@ impl App {
             self.config = session.config().clone();
             self.estimated_tokens = session.estimated_prompt_tokens();
             self.history_len = session.history_len();
+            self.todo_details = session.todo_details();
+            self.todo_status_line = session.todo_status_line();
         }
     }
 
@@ -839,7 +478,10 @@ impl App {
         }
 
         let field = SETTINGS[self.selected_setting];
-        if matches!(field, SettingField::AllowShell | SettingField::Stream) {
+        if matches!(
+            field,
+            SettingField::AllowShell | SettingField::Stream | SettingField::ThinkingEffort
+        ) {
             return self.toggle_setting();
         }
 
@@ -862,6 +504,9 @@ impl App {
             }
             SettingField::Stream => {
                 config.model.stream = !config.model.stream;
+            }
+            SettingField::ThinkingEffort => {
+                config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);
             }
             _ => return Ok(()),
         }
@@ -922,247 +567,4 @@ impl App {
     fn is_busy(&self) -> bool {
         self.send_task.is_some()
     }
-}
-
-impl TranscriptItem {
-    fn user(body: impl Into<String>) -> Self {
-        Self {
-            role: TranscriptRole::User,
-            title: "You".to_string(),
-            body: body.into(),
-        }
-    }
-
-    fn system(title: impl Into<String>, body: impl Into<String>) -> Self {
-        Self {
-            role: TranscriptRole::System,
-            title: title.into(),
-            body: body.into(),
-        }
-    }
-
-    fn error(body: impl Into<String>) -> Self {
-        Self {
-            role: TranscriptRole::Error,
-            title: "Error".to_string(),
-            body: body.into(),
-        }
-    }
-
-    fn from_message(message: &Message) -> Self {
-        match (message.role, message.channel, &message.recipient) {
-            (Role::Assistant, Some(Channel::Final), _) => Self {
-                role: TranscriptRole::Assistant,
-                title: "Assistant".to_string(),
-                body: message.content.clone(),
-            },
-            (Role::Assistant, Some(Channel::Commentary), Some(recipient)) => Self {
-                role: TranscriptRole::Tool,
-                title: format!("Tool call {recipient}"),
-                body: message.content.clone(),
-            },
-            (Role::Tool, _, Some(recipient)) => Self {
-                role: TranscriptRole::Tool,
-                title: format!("Tool result {recipient}"),
-                body: message.content.clone(),
-            },
-            _ => Self {
-                role: TranscriptRole::System,
-                title: "Message".to_string(),
-                body: message.content.clone(),
-            },
-        }
-    }
-}
-
-impl TranscriptRole {
-    fn label(self) -> &'static str {
-        match self {
-            TranscriptRole::User => "USER",
-            TranscriptRole::Assistant => "OH",
-            TranscriptRole::Tool => "TOOL",
-            TranscriptRole::System => "SYS",
-            TranscriptRole::Error => "ERR",
-        }
-    }
-
-    fn style(self, theme: &Theme) -> Style {
-        match self {
-            TranscriptRole::User => theme.role_style(RoleKind::User),
-            TranscriptRole::Assistant => theme.role_style(RoleKind::Assistant),
-            TranscriptRole::Tool => theme.role_style(RoleKind::Tool),
-            TranscriptRole::System => theme.role_style(RoleKind::System),
-            TranscriptRole::Error => theme.status_style(StatusKind::Error),
-        }
-    }
-}
-
-impl SettingField {
-    fn label(self) -> &'static str {
-        match self {
-            SettingField::Endpoint => "endpoint",
-            SettingField::Model => "model",
-            SettingField::ApiKeyEnv => "api key env",
-            SettingField::MaxTokens => "max tokens",
-            SettingField::Temperature => "temperature",
-            SettingField::ThinkingEffort => "thinking",
-            SettingField::Stream => "stream",
-            SettingField::Timeout => "timeout secs",
-            SettingField::ToolTurns => "tool turns",
-            SettingField::Stop => "stop",
-            SettingField::Workspace => "workspace",
-            SettingField::AllowShell => "allow shell",
-        }
-    }
-
-    fn value(self, config: &Config) -> String {
-        match self {
-            SettingField::Endpoint => config.model.endpoint.clone(),
-            SettingField::Model => config.model.model.clone(),
-            SettingField::ApiKeyEnv => config.model.api_key_env.clone().unwrap_or_default(),
-            SettingField::MaxTokens => config.model.max_tokens.to_string(),
-            SettingField::Temperature => format!("{:.2}", config.model.temperature),
-            SettingField::ThinkingEffort => config.model.thinking_effort.clone(),
-            SettingField::Stream => config.model.stream.to_string(),
-            SettingField::Timeout => config.model.request_timeout_secs.to_string(),
-            SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
-            SettingField::Stop => config.model.stop.join(","),
-            SettingField::Workspace => config.harness.workspace.display().to_string(),
-            SettingField::AllowShell => config.harness.allow_shell.to_string(),
-        }
-    }
-
-    fn apply(self, config: &mut Config, value: String) -> Result<()> {
-        match self {
-            SettingField::Endpoint => config.model.endpoint = non_empty(value, "endpoint")?,
-            SettingField::Model => config.model.model = non_empty(value, "model")?,
-            SettingField::ApiKeyEnv => {
-                let value = value.trim().to_string();
-                config.model.api_key_env = if value.is_empty() { None } else { Some(value) };
-            }
-            SettingField::MaxTokens => {
-                config.model.max_tokens = parse_number(&value, "max tokens")?;
-            }
-            SettingField::Temperature => {
-                config.model.temperature = value
-                    .trim()
-                    .parse()
-                    .context("temperature must be a number")?;
-            }
-            SettingField::ThinkingEffort => {
-                let value = value.trim().to_ascii_lowercase();
-                if !matches!(value.as_str(), "none" | "low" | "medium" | "high") {
-                    return Err(anyhow!("thinking must be one of none, low, medium, high"));
-                }
-                config.model.thinking_effort = value;
-            }
-            SettingField::Stream => {
-                config.model.stream = value
-                    .trim()
-                    .parse()
-                    .context("stream must be true or false")?;
-            }
-            SettingField::Timeout => {
-                config.model.request_timeout_secs = parse_number(&value, "timeout secs")?;
-            }
-            SettingField::ToolTurns => {
-                config.harness.max_tool_turns = parse_number(&value, "tool turns")?;
-            }
-            SettingField::Stop => {
-                config.model.stop = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|part| !part.is_empty())
-                    .map(ToString::to_string)
-                    .collect();
-            }
-            SettingField::Workspace => {
-                config.harness.workspace = PathBuf::from(non_empty(value, "workspace")?);
-            }
-            SettingField::AllowShell => {
-                config.harness.allow_shell = value
-                    .trim()
-                    .parse()
-                    .context("allow shell must be true or false")?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-fn non_empty(value: String, label: &str) -> Result<String> {
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return Err(anyhow!("{label} cannot be empty"));
-    }
-    Ok(value)
-}
-
-fn parse_number<T>(value: &str, label: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-{
-    value
-        .trim()
-        .parse()
-        .with_context(|| format!("{label} must be a number"))
-}
-
-fn compact(value: &str, max_len: usize) -> String {
-    let char_count = value.chars().count();
-    if char_count <= max_len || max_len < 4 {
-        return value.to_string();
-    }
-
-    let prefix = value.chars().take(max_len - 3).collect::<String>();
-    format!("{prefix}...")
-}
-
-fn token_ratio(estimated: usize, max_tokens: u32) -> f64 {
-    if max_tokens == 0 {
-        return 0.0;
-    }
-
-    (estimated as f64 / max_tokens as f64).clamp(0.0, 1.0)
-}
-
-fn token_status_kind(ratio: f64) -> StatusKind {
-    if ratio >= 0.9 {
-        StatusKind::Error
-    } else if ratio >= 0.72 {
-        StatusKind::Warn
-    } else {
-        StatusKind::Ok
-    }
-}
-
-fn wrap_text(text: &str, width: u16) -> Vec<String> {
-    let width = width.max(12) as usize;
-    if text.chars().count() <= width {
-        return vec![text.to_string()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let next_len =
-            current.chars().count() + word.chars().count() + usize::from(!current.is_empty());
-        if next_len > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-
-    if current.is_empty() {
-        lines.push(text.chars().take(width).collect());
-    } else {
-        lines.push(current);
-    }
-    lines
 }

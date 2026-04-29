@@ -10,6 +10,7 @@ The first milestone is intentionally small:
 - call an OpenAI-compatible local `/v1/completions` endpoint
 - run in an `OH!` terminal UI with chat and settings views
 - expose read-only workspace tools through Harmony commentary tool calls
+- keep an in-memory task todo list that the agent can create, display, and update
 
 ## Why Harmony
 
@@ -35,6 +36,8 @@ OpenHarness normalizes that to `/v1/chat/completions`. You can still provide an
 explicit `/v1/completions` endpoint for servers that accept raw text completions.
 
 Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
+Use `/tools` to inspect the detailed tool catalog exposed to the agent, and
+`/todos` to display the current task todo list.
 Use `/settings`, `Tab`, or `F2` to open API settings.
 
 ## Configuration
@@ -85,15 +88,26 @@ server and increase context/token settings on the server side.
 
 ## Current Scope
 
-The implemented tools are read-only:
+The implemented workspace tools are read-only:
 
 - `functions.list_files`
 - `functions.read_file`
 - `functions.search`
 
+The agent can also maintain in-memory task state:
+
+- `functions.todo_read`
+- `functions.todo_write`
+
 Editing and shell execution are deliberately gated for a later milestone so the
 harness can grow an explicit approval flow instead of mutating a workspace
 silently.
+
+The MVP should stay focused on Harmony-capable `gpt-oss` models behind
+OpenAI-compatible local or remote endpoints. External APIs can fit the same
+endpoint/auth shape when they are OpenAI-compatible, but provider-specific
+adapters and non-Harmony prompt formats for model families such as Qwen or Gemma
+should wait until the agent loop, tool visibility, and task tracking are solid.
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
 ask for a narrower step. OpenHarness returns a normal assistant message when the

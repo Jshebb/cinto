@@ -119,6 +119,21 @@ pub const BRAND_NAME: &str = "OH!";
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+pub const THINKING_FLAVOR: &[&str] = &[
+    "Reading the room",
+    "Tracing the thread",
+    "Checking the shape of it",
+    "Holding the context",
+    "Following the clues",
+    "Letting the tokens settle",
+    "Looking for the clean move",
+    "Keeping the harness warm",
+];
+
 pub fn spinner_frame(tick: u64) -> &'static str {
     SPINNER_FRAMES[(tick as usize) % SPINNER_FRAMES.len()]
+}
+
+pub fn thinking_flavor(tick: u64) -> &'static str {
+    THINKING_FLAVOR[((tick / 8) as usize) % THINKING_FLAVOR.len()]
 }

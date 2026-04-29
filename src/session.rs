@@ -5,12 +5,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::Config,
-    harmony::{AssistantOutput, HarmonyPrompt, parse_assistant_output},
+    harmony::{AssistantOutput, HarmonyPrompt, available_tool_details, parse_assistant_output},
     model::ModelClient,
 };
 
@@ -88,6 +89,7 @@ pub struct AgentSession {
     prompt: HarmonyPrompt,
     client: ModelClient,
     history: Vec<Message>,
+    todos: Vec<TodoItem>,
 }
 
 impl AgentSession {
@@ -103,11 +105,13 @@ impl AgentSession {
             prompt,
             client,
             history: Vec::new(),
+            todos: Vec::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.history.clear();
+        self.todos.clear();
     }
 
     pub fn config(&self) -> &Config {
@@ -135,6 +139,39 @@ impl AgentSession {
         self.history.len()
     }
 
+    pub fn tool_details(&self) -> String {
+        available_tool_details()
+    }
+
+    pub fn todo_details(&self) -> String {
+        format_todos(&self.todos)
+    }
+
+    pub fn todo_status_line(&self) -> String {
+        if self.todos.is_empty() {
+            return "none".to_string();
+        }
+
+        let total = self.todos.len();
+        let done = self
+            .todos
+            .iter()
+            .filter(|item| item.status == TodoStatus::Done)
+            .count();
+        let blocked = self
+            .todos
+            .iter()
+            .filter(|item| item.status == TodoStatus::Blocked)
+            .count();
+        let active = total.saturating_sub(done);
+
+        if blocked > 0 {
+            format!("{done}/{total} done, {blocked} blocked")
+        } else {
+            format!("{done}/{total} done, {active} active")
+        }
+    }
+
     pub async fn send_user_message_streaming(
         &mut self,
         content: String,
@@ -153,7 +190,8 @@ impl AgentSession {
         for _ in 0..max_tool_turns {
             let prompt = self.render_prompt();
             let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
-            let completion = self.client.complete_streaming(prompt, delta_tx);
+            let client = self.client.clone();
+            let completion = client.complete_streaming(prompt, delta_tx);
 
             tokio::pin!(completion);
             loop {
@@ -204,11 +242,14 @@ impl AgentSession {
         Ok(())
     }
 
-    fn execute_tool(&self, recipient: &str, arguments: &str) -> Result<String> {
-        match recipient {
+    fn execute_tool(&mut self, recipient: &str, arguments: &str) -> Result<String> {
+        let recipient = clean_recipient(recipient);
+        match recipient.as_str() {
             "functions.list_files" => self.list_files(arguments),
             "functions.read_file" => self.read_file(arguments),
             "functions.search" => self.search(arguments),
+            "functions.todo_read" => Ok(self.todo_details()),
+            "functions.todo_write" => self.todo_write(arguments),
             _ => Ok(format!("unsupported tool: {recipient}")),
         }
     }
@@ -271,6 +312,19 @@ impl AgentSession {
         }
     }
 
+    fn todo_write(&mut self, arguments: &str) -> Result<String> {
+        let update: TodoUpdate =
+            serde_json::from_str(arguments.trim()).context("todo_write arguments must be JSON")?;
+
+        self.todos = update
+            .items
+            .into_iter()
+            .map(TodoItem::try_from)
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(format_todos(&self.todos))
+    }
+
     fn workspace_path(&self, requested: &str) -> Result<PathBuf> {
         let requested_path = Path::new(requested);
         if requested_path.is_absolute() {
@@ -315,4 +369,127 @@ impl AgentSession {
 
 fn parse_json(arguments: &str) -> Result<Value> {
     serde_json::from_str(arguments.trim()).context("tool arguments must be JSON")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TodoItem {
+    title: String,
+    status: TodoStatus,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoStatus {
+    Pending,
+    InProgress,
+    Done,
+    Blocked,
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoUpdate {
+    items: Vec<TodoInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoInput {
+    title: String,
+    status: String,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+impl TryFrom<TodoInput> for TodoItem {
+    type Error = anyhow::Error;
+
+    fn try_from(input: TodoInput) -> Result<Self> {
+        let title = input.title.trim().to_string();
+        if title.is_empty() {
+            return Err(anyhow!("todo title cannot be empty"));
+        }
+
+        let detail = input
+            .detail
+            .map(|detail| detail.trim().to_string())
+            .filter(|detail| !detail.is_empty());
+
+        Ok(Self {
+            title,
+            status: TodoStatus::try_from(input.status.as_str())?,
+            detail,
+        })
+    }
+}
+
+impl TryFrom<&str> for TodoStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        match value.trim() {
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "done" => Ok(Self::Done),
+            "blocked" => Ok(Self::Blocked),
+            other => Err(anyhow!(
+                "todo status must be pending, in_progress, done, or blocked, got {other}"
+            )),
+        }
+    }
+}
+
+impl TodoStatus {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Pending => "[ ]",
+            Self::InProgress => "[*]",
+            Self::Done => "[x]",
+            Self::Blocked => "[!]",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in progress",
+            Self::Done => "done",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+fn format_todos(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return "No todo list is set for the current task.".to_string();
+    }
+
+    let mut output = String::from("Current task todo list\n\n");
+    for (index, item) in todos.iter().enumerate() {
+        output.push_str(&format!(
+            "{} {}. {} ({})\n",
+            item.status.marker(),
+            index + 1,
+            item.title,
+            item.status.label()
+        ));
+
+        if let Some(detail) = &item.detail {
+            output.push_str("    ");
+            output.push_str(detail);
+            output.push('\n');
+        }
+    }
+
+    output.trim_end().to_string()
+}
+
+fn clean_recipient(recipient: &str) -> String {
+    recipient
+        .split("<|")
+        .next()
+        .unwrap_or(recipient)
+        .split_whitespace()
+        .next()
+        .unwrap_or(recipient)
+        .trim()
+        .to_string()
 }

@@ -73,31 +73,73 @@ impl HarmonyPrompt {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ToolSpec {
-    name: String,
-    description: String,
+    name: &'static str,
+    description: &'static str,
+    schema: &'static str,
+}
+
+pub fn available_tool_details() -> String {
+    let mut details = String::from("Available agent tools\n\n");
+
+    for tool in default_tools() {
+        details.push_str("**");
+        details.push_str(tool.name);
+        details.push_str("**\n");
+        details.push_str(tool.description);
+        details.push_str("\nSchema: ");
+        details.push_str(tool.schema);
+        details.push_str("\n\n");
+    }
+
+    details.trim_end().to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolCatalogEntry {
+    name: &'static str,
+    description: &'static str,
     schema: &'static str,
 }
 
 fn default_tools() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec {
-            name: "functions.list_files".to_string(),
-            description: "List files under a relative workspace path.".to_string(),
+    const TOOLS: &[ToolCatalogEntry] = &[
+        ToolCatalogEntry {
+            name: "functions.list_files",
+            description: "List immediate child entries under a relative workspace path. Directories are suffixed with `/`.",
             schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}"#,
         },
-        ToolSpec {
-            name: "functions.read_file".to_string(),
-            description: "Read a UTF-8 text file from the workspace.".to_string(),
+        ToolCatalogEntry {
+            name: "functions.read_file",
+            description: "Read a UTF-8 text file from the workspace. The `path` must be relative and cannot escape the workspace.",
             schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
         },
-        ToolSpec {
-            name: "functions.search".to_string(),
-            description: "Search the workspace with ripgrep.".to_string(),
+        ToolCatalogEntry {
+            name: "functions.search",
+            description: "Search the workspace with ripgrep and return matching lines with line numbers.",
             schema: r#"{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"}},"required":["query"],"additionalProperties":false}"#,
         },
-    ]
+        ToolCatalogEntry {
+            name: "functions.todo_read",
+            description: "Read the current in-memory todo list for the active task.",
+            schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#,
+        },
+        ToolCatalogEntry {
+            name: "functions.todo_write",
+            description: "Replace the current in-memory todo list for the active task. Use this to create a task plan, mark progress, and keep the user-facing task state current.",
+            schema: r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","done","blocked"]},"detail":{"type":"string"}},"required":["title","status"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false}"#,
+        },
+    ];
+
+    TOOLS
+        .iter()
+        .map(|tool| ToolSpec {
+            name: tool.name,
+            description: tool.description,
+            schema: tool.schema,
+        })
+        .collect()
 }
 
 fn render_message(prompt: &mut String, message: &Message) {
@@ -154,7 +196,7 @@ fn parse_tool_call(text: &str) -> Option<(String, String)> {
     let to_index = commentary.find(" to=functions.")?;
     let after_to = &commentary[to_index + " to=".len()..];
     let message_index = after_to.find(MESSAGE)?;
-    let recipient = after_to[..message_index].trim().to_string();
+    let recipient = normalize_recipient(after_to[..message_index].trim());
     let arguments = after_to[message_index + MESSAGE.len()..]
         .split(CALL)
         .next()
@@ -165,6 +207,18 @@ fn parse_tool_call(text: &str) -> Option<(String, String)> {
         .trim()
         .to_string();
     Some((recipient, arguments))
+}
+
+fn normalize_recipient(recipient: &str) -> String {
+    recipient
+        .split("<|")
+        .next()
+        .unwrap_or(recipient)
+        .split_whitespace()
+        .next()
+        .unwrap_or(recipient)
+        .trim()
+        .to_string()
 }
 
 fn parse_channel<'a>(text: &'a str, channel: &str) -> Option<&'a str> {
@@ -237,6 +291,21 @@ mod tests {
             AssistantOutput::ToolCall {
                 recipient: "functions.read_file".to_string(),
                 arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn strips_constraint_marker_from_tool_recipient() {
+        let parsed = parse_assistant_output(
+            "<|channel|>commentary to=functions.list_files <|constrain|>json<|message|>{\"path\":\".\"}<|call|>",
+        );
+
+        assert_eq!(
+            parsed,
+            AssistantOutput::ToolCall {
+                recipient: "functions.list_files".to_string(),
+                arguments: "{\"path\":\".\"}".to_string(),
             }
         );
     }

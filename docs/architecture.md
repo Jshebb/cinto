@@ -31,11 +31,20 @@ renderer/parser for servers that accept pre-tokenized prompts.
 
 ## Tool Policy
 
-Milestone 1 exposes read-only tools:
+Milestone 1 exposes read-only workspace tools:
 
 - `functions.list_files`
 - `functions.read_file`
 - `functions.search`
+
+It also exposes in-memory task planning tools:
+
+- `functions.todo_read`
+- `functions.todo_write`
+
+The todo tools are deliberately not persisted yet. They give the model a
+structured way to create, display, and follow a detailed task list during a
+session without expanding the file mutation surface.
 
 Tool loops are capped by `harness.max_tool_turns`, which defaults to 16. Tool
 execution errors are returned to the model as tool output so the model can
@@ -91,12 +100,23 @@ Thinking effort is stored as `model.thinking_effort` and sent as
 `reasoning_effort` when it is not `none`. The UI displays the active effort in
 the header, context rail, and settings view.
 
+For the MVP, external API support should mean "works through the existing
+OpenAI-compatible endpoint and bearer-token shape." That keeps remote and local
+testing possible without introducing a provider abstraction before the core
+agent loop settles.
+
+Non-Harmony model families such as Qwen or Gemma should be treated as a later
+protocol-adapter milestone. They may need different chat templates, tool-call
+formats, stop sequences, and parsing rules. Supporting them cleanly means adding
+a `protocol` boundary around prompt rendering, tool-call parsing, and response
+normalization instead of branching throughout `session` and `model`.
+
 ## Next Milestones
 
 1. Replace the prompt parser with canonical Harmony parsing where backend support
    allows it.
-2. Add streaming completions and incremental transcript rendering.
-3. Add editable file patches with preview, approval, and rollback metadata.
-4. Add a planning panel that separates requested work, tool calls, and final
+2. Add editable file patches with preview, approval, and rollback metadata.
+3. Add a planning panel that separates requested work, todo state, tool calls, and final
    answers.
-5. Persist sessions under `.openharness/sessions`.
+4. Persist sessions under `.openharness/sessions`.
+5. Add protocol adapters for non-Harmony models once the Harmony path is stable.
