@@ -19,23 +19,45 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            fg: Color::Rgb(202, 211, 245),          // Texto principal (suave)
-            dim: Color::Rgb(128, 135, 162),         // Texto secundário/inativo
-            muted: Color::Rgb(91, 96, 120),         // Bordas sutis e fundo inativo
-            chrome: Color::Rgb(54, 58, 79),         // Elementos de UI pesados
-            accent: Color::Rgb(245, 169, 127),      // Peach (destaques suaves)
-            accent_soft: Color::Rgb(238, 212, 159), // Yellow (secundário)
-            user: Color::Rgb(138, 173, 244),        // Azul pastel (Usuário)
-            assistant: Color::Rgb(198, 160, 246),   // Roxo/Mauve pastel (IA)
-            tool: Color::Rgb(166, 218, 149),        // Verde pastel (Ferramentas)
-            success: Color::Rgb(166, 218, 149),
-            warning: Color::Rgb(238, 212, 159),
-            error: Color::Rgb(237, 135, 150), // Vermelho lavado
+            fg: Color::Rgb(218, 226, 232),
+            dim: Color::Rgb(132, 145, 154),
+            muted: Color::Rgb(82, 96, 106),
+            chrome: Color::Rgb(43, 53, 60),
+            accent: Color::Rgb(92, 214, 205),
+            accent_soft: Color::Rgb(132, 186, 255),
+            user: Color::Rgb(132, 186, 255),
+            assistant: Color::Rgb(92, 214, 205),
+            tool: Color::Rgb(154, 214, 128),
+            success: Color::Rgb(154, 214, 128),
+            warning: Color::Rgb(228, 204, 112),
+            error: Color::Rgb(236, 118, 130),
         }
     }
 }
 
 impl Theme {
+    pub fn logo_lines(&self) -> Vec<ratatui::text::Line<'static>> {
+        use ratatui::text::{Line, Span};
+
+        vec![
+            Line::from(vec![
+                Span::styled(" ███ ", self.brand()),
+                Span::styled("█ █ ", self.brand_subtle()),
+                Span::styled("█ ", self.brand()),
+            ]),
+            Line::from(vec![
+                Span::styled(" █ █ ", self.brand()),
+                Span::styled("███ ", self.brand_subtle()),
+                Span::styled("█ ", self.brand()),
+            ]),
+            Line::from(vec![
+                Span::styled(" ███ ", self.brand()),
+                Span::styled("█ █ ", self.brand_subtle()),
+                Span::styled("▄ ", self.brand()),
+            ]),
+        ]
+    }
+
     pub fn brand(&self) -> Style {
         Style::default()
             .fg(self.accent)
@@ -93,7 +115,6 @@ pub enum StatusKind {
     Error,
 }
 
-pub const BRAND_GLYPH: &str = ">";
 pub const BRAND_NAME: &str = "OH!";
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

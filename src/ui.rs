@@ -11,7 +11,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     prelude::{CrosstermBackend, Terminal},
     style::Style,
     text::{Line, Span},
@@ -25,7 +25,7 @@ use tokio::{
 use crate::{
     config::Config,
     session::{AgentSession, Channel, Message, Role, TurnEvent},
-    theme::{BRAND_GLYPH, BRAND_NAME, RoleKind, StatusKind, Theme, spinner_frame},
+    theme::{BRAND_NAME, RoleKind, StatusKind, Theme, spinner_frame},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +179,7 @@ impl App {
                 let [header_area, body_area, input_area, footer_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(3),
+                        Constraint::Length(4),
                         Constraint::Min(8),
                         Constraint::Length(input_height),
                         Constraint::Length(2),
@@ -227,27 +227,21 @@ impl App {
             View::Chat => "chat",
             View::Settings => "settings",
         };
-        let busy = self.is_busy();
-        let activity = if busy {
-            spinner_frame(self.spinner_tick)
-        } else {
-            " "
-        };
         let endpoint = compact(
             &self.config.model.endpoint,
             area.width.saturating_sub(34) as usize,
         );
 
-        let header = Paragraph::new(vec![
+        let [meta_area, logo_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(30), Constraint::Length(16)])
+            .areas(area);
+
+        let meta = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled(format!(" {BRAND_NAME} "), self.theme.brand()),
-                Span::styled(format!(" {BRAND_GLYPH} "), self.theme.brand_subtle()),
-                Span::raw("OpenHarness"),
+                Span::styled(BRAND_NAME, self.theme.brand()),
+                Span::raw(" OpenHarness"),
                 Span::styled(format!("  {view}"), self.theme.dim_style()),
-                Span::styled(
-                    format!("  {activity}"),
-                    self.theme.status_style(self.status_kind),
-                ),
             ]),
             Line::from(vec![
                 Span::styled("model ", self.theme.dim_style()),
@@ -257,10 +251,23 @@ impl App {
                 Span::styled("  endpoint ", self.theme.dim_style()),
                 Span::raw(endpoint),
             ]),
-        ])
-        .block(Block::default().borders(Borders::BOTTOM));
+        ]);
+        frame.render_widget(
+            meta,
+            meta_area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+        );
 
-        frame.render_widget(header, area);
+        let logo = Paragraph::new(self.theme.logo_lines()).alignment(Alignment::Right);
+        frame.render_widget(
+            logo,
+            logo_area.inner(Margin {
+                vertical: 0,
+                horizontal: 1,
+            }),
+        );
     }
 
     fn render_chat(&mut self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -269,8 +276,12 @@ impl App {
             .constraints([Constraint::Min(48), Constraint::Length(24)])
             .areas(area);
 
-        let lines = self.transcript_lines(messages_area.width.saturating_sub(2));
-        let visible = messages_area.height.saturating_sub(2) as usize;
+        let messages_inner = messages_area.inner(Margin {
+            vertical: 1,
+            horizontal: 2,
+        });
+        let lines = self.transcript_lines(messages_inner.width);
+        let visible = messages_inner.height as usize;
         let max_scroll = lines.len().saturating_sub(visible) as u16;
         if self.follow_tail {
             self.chat_scroll = max_scroll;
@@ -279,15 +290,18 @@ impl App {
         }
 
         let transcript = Paragraph::new(lines)
-            .block(Block::default().title(" Chat ").borders(Borders::ALL))
             .wrap(Wrap { trim: false })
             .scroll((self.chat_scroll, 0));
-        frame.render_widget(transcript, messages_area);
+        frame.render_widget(transcript, messages_inner);
 
-        let rail = Paragraph::new(self.context_rail_lines())
-            .block(Block::default().title(" OH! ").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(rail, rail_area);
+        let rail = Paragraph::new(self.context_rail_lines()).wrap(Wrap { trim: false });
+        frame.render_widget(
+            rail,
+            rail_area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+        );
     }
 
     fn render_settings(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -295,6 +309,10 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
             .areas(area);
+        let settings_inner = settings_area.inner(Margin {
+            vertical: 1,
+            horizontal: 2,
+        });
 
         let mut rows = Vec::new();
         let locked = self.is_busy();
@@ -329,10 +347,8 @@ impl App {
             ]));
         }
 
-        let settings = Paragraph::new(rows)
-            .block(Block::default().title(" Settings ").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(settings, settings_area);
+        let settings = Paragraph::new(rows).wrap(Wrap { trim: false });
+        frame.render_widget(settings, settings_inner);
 
         let path = self
             .config_path
@@ -362,13 +378,19 @@ impl App {
             Line::styled("Config Path", self.theme.brand()),
             Line::raw(path),
         ])
-        .block(Block::default().title(" Setup ").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
-        frame.render_widget(help, help_area);
+        frame.render_widget(
+            help,
+            help_area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+        );
     }
 
     fn render_input(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let (title, content, style) = match self.view {
+        let working = self.is_busy();
+        let (title, mut content, style) = match self.view {
             View::Chat if self.is_busy() => (
                 " Input ",
                 vec![Line::raw("model is working; scroll remains available")],
@@ -395,6 +417,20 @@ impl App {
                 self.theme.dim_style(),
             ),
         };
+
+        if working {
+            content.insert(
+                0,
+                Line::from(vec![
+                    Span::styled(
+                        spinner_frame(self.spinner_tick),
+                        self.theme.status_style(StatusKind::Working),
+                    ),
+                    Span::styled(" Working ", self.theme.status_style(StatusKind::Working)),
+                    Span::styled(self.status.as_str(), self.theme.dim_style()),
+                ]),
+            );
+        }
 
         let input = Paragraph::new(content)
             .style(style)
@@ -719,6 +755,8 @@ impl App {
         let state = if self.is_busy() { "running" } else { "ready" };
 
         vec![
+            Line::styled("OH! OpenHarness", self.theme.brand()),
+            Line::raw(""),
             Line::styled("Session", self.theme.brand()),
             Line::raw(format!("state: {state}")),
             Line::raw(format!("elapsed: {elapsed}")),
