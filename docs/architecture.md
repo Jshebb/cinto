@@ -1,0 +1,69 @@
+# OpenHarness Architecture
+
+OpenHarness is meant to become a local coding harness for `gpt-oss-20b` and
+`gpt-oss-120b`, with Harmony as the model-facing protocol and a terminal UI as
+the operator surface.
+
+## Reference Shape
+
+Pi's coding-agent docs are a useful reference for the outer loop: keep the agent
+stateful, make tool calls explicit, show users what the model is doing, and put
+workspace-changing actions behind clear policy.
+
+Harmony is the inner protocol. The model should see role, channel, tool, and
+final-answer structure rather than an untyped chat transcript. The current
+implementation renders a text Harmony prompt because most local OpenAI-compatible
+servers accept prompt text through `/v1/completions`.
+
+The official `openai-harmony` Rust crate is the likely next step when we support
+token-id based backends directly. That will let the harness rely on the canonical
+renderer/parser for servers that accept pre-tokenized prompts.
+
+## Components
+
+- `config`: loads model endpoint, model name, workspace, and prompt policy
+- `harmony`: renders Harmony text and parses final answers or tool calls
+- `model`: calls an OpenAI-compatible local completion endpoint
+- `session`: owns conversation history, tool execution, and tool-loop depth
+- `ui`: provides the ratatui/crossterm terminal interface
+
+## Tool Policy
+
+Milestone 1 exposes read-only tools:
+
+- `functions.list_files`
+- `functions.read_file`
+- `functions.search`
+
+Milestone 2 should add write tools with a diff preview and a user approval step.
+Milestone 3 can add shell commands with allowlists, working-directory controls,
+and visible stdout/stderr in the TUI.
+
+## Model Backends
+
+The default backend is any local server that offers:
+
+```text
+POST /v1/completions
+```
+
+and returns:
+
+```json
+{"choices":[{"text":"..."}]}
+```
+
+For `gpt-oss-20b`, this can be a local workstation target. For `gpt-oss-120b`,
+the harness should treat latency and context size as first-class UI concerns:
+show in-flight status, keep tool output compact, and eventually support
+streaming.
+
+## Next Milestones
+
+1. Replace the prompt parser with canonical Harmony parsing where backend support
+   allows it.
+2. Add streaming completions and incremental transcript rendering.
+3. Add editable file patches with preview, approval, and rollback metadata.
+4. Add a planning panel that separates requested work, tool calls, and final
+   answers.
+5. Persist sessions under `.openharness/sessions`.
