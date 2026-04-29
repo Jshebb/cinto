@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ModelConfig;
@@ -12,10 +14,12 @@ pub struct ModelClient {
 
 impl ModelClient {
     pub fn new(config: ModelConfig) -> Self {
-        Self {
-            http: Client::new(),
-            config,
-        }
+        let http = Client::builder()
+            .timeout(Duration::from_secs(config.request_timeout_secs))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { http, config }
     }
 
     pub async fn complete(&self, prompt: String) -> Result<String> {
@@ -31,8 +35,7 @@ impl ModelClient {
         };
 
         let response = self
-            .http
-            .post(&self.config.endpoint)
+            .authorize(self.http.post(&self.config.endpoint))
             .json(&request)
             .send()
             .await
@@ -55,6 +58,17 @@ impl ModelClient {
             .next()
             .map(|choice| choice.text)
             .context("completion response had no choices")
+    }
+
+    fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+        let Some(env_name) = self.config.api_key_env.as_deref() else {
+            return request;
+        };
+
+        match std::env::var(env_name) {
+            Ok(api_key) if !api_key.trim().is_empty() => request.bearer_auth(api_key),
+            _ => request,
+        }
     }
 }
 

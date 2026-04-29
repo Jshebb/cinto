@@ -23,9 +23,11 @@ renderer/parser for servers that accept pre-tokenized prompts.
 
 - `config`: loads model endpoint, model name, workspace, and prompt policy
 - `harmony`: renders Harmony text and parses final answers or tool calls
-- `model`: calls an OpenAI-compatible local completion endpoint
+- `model`: calls an OpenAI-compatible local completion endpoint with optional
+  bearer auth from an environment variable
 - `session`: owns conversation history, tool execution, and tool-loop depth
-- `ui`: provides the ratatui/crossterm terminal interface
+- `ui`: provides the ratatui/crossterm terminal interface, including the `OH!`
+  chat and settings views
 
 ## Tool Policy
 
@@ -57,6 +59,11 @@ For `gpt-oss-20b`, this can be a local workstation target. For `gpt-oss-120b`,
 the harness should treat latency and context size as first-class UI concerns:
 show in-flight status, keep tool output compact, and eventually support
 streaming.
+
+API credentials are configured by environment variable name rather than by
+storing the secret in TOML. This keeps the settings view useful for local and
+remote OpenAI-compatible backends without turning the config file into a secret
+store.
 
 ## Next Milestones
 

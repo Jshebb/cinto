@@ -8,7 +8,7 @@ The first milestone is intentionally small:
 
 - render Harmony prompts with `system`, `developer`, user, assistant, and tool messages
 - call an OpenAI-compatible local `/v1/completions` endpoint
-- run in a terminal UI with a persistent transcript
+- run in an `OH!` terminal UI with chat and settings views
 - expose read-only workspace tools through Harmony commentary tool calls
 
 ## Why Harmony
@@ -32,6 +32,7 @@ http://127.0.0.1:8000/v1/completions
 ```
 
 Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
+Use `/settings`, `Tab`, or `F2` to open API settings.
 
 ## Configuration
 
@@ -41,9 +42,11 @@ Create `~/.config/openharness/config.toml` or pass `--config path/to/config.toml
 [model]
 endpoint = "http://127.0.0.1:8000/v1/completions"
 model = "openai/gpt-oss-20b"
+api_key_env = "OPENAI_API_KEY"
 max_tokens = 4096
 temperature = 0.2
 stop = ["<|return|>", "<|call|>"]
+request_timeout_secs = 600
 
 [harness]
 workspace = "/home/you/project"
@@ -52,8 +55,22 @@ system_prompt = "You are OpenHarness, a local coding agent running in a terminal
 developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits."
 ```
 
+Leave `api_key_env` blank or remove it for local servers that do not need bearer
+auth. When it is set, OpenHarness reads the secret from that environment
+variable and sends it as a bearer token. The TUI saves the variable name, not the
+secret.
+
 For `gpt-oss-120b`, change `model` to the model name exposed by your local
 server and increase context/token settings on the server side.
+
+## TUI Controls
+
+- `Tab` or `F2`: switch between Chat and Settings
+- `Enter`: send a chat message or edit/apply a setting
+- `Up`/`Down`: move through settings
+- `Space`: toggle boolean settings
+- `s`: save settings to TOML
+- `Ctrl-C`: quit
 
 ## Current Scope
 

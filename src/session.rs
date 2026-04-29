@@ -102,6 +102,19 @@ impl AgentSession {
         self.history.clear();
     }
 
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn update_config(&mut self, config: Config) {
+        self.prompt = HarmonyPrompt::new(
+            config.harness.system_prompt.clone(),
+            config.harness.developer_prompt.clone(),
+        );
+        self.client = ModelClient::new(config.model.clone());
+        self.config = config;
+    }
+
     pub fn render_prompt(&self) -> String {
         self.prompt.render(&self.history)
     }

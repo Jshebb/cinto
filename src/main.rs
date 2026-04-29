@@ -27,6 +27,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let config_path = args.config.clone().or_else(Config::default_path);
     let config = Config::load(args.config)?;
     let session = AgentSession::new(config);
 
@@ -35,6 +36,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut app = App::new(session);
+    let mut app = App::new(session, config_path);
     app.run().await
 }
