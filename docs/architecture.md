@@ -54,6 +54,34 @@ Milestone 2 should add write tools with a diff preview and a user approval step.
 Milestone 3 can add shell commands with allowlists, working-directory controls,
 and visible stdout/stderr in the TUI.
 
+## Safety Rails
+
+The first safety features are local TUI commands, not model tools:
+
+- `/diff` shows git status, diff stat, and a bounded tracked diff.
+- `/checkpoint [label]` writes a patch snapshot under `.openharness/checkpoints`.
+- `/checkpoints` lists saved snapshots.
+
+Checkpoints are intentionally non-destructive. They do not commit, stash, reset,
+or apply changes. Rollback and patch-apply flows should be a later milestone with
+explicit preview and approval.
+
+The TUI also renders large tool calls and tool results as compact previews with
+size metadata, first lines, and last lines. This is a display-only truncation so
+the terminal stays usable after a large `read_file`; the session history still
+carries the full tool content for the current model loop.
+
+Very large tool results are compacted before being appended to model-facing
+history. The compacted message includes original size metadata, first/last
+sections, guidance to use search or narrower reads, and an explicit
+`<OPENHARNESS_TOOL_OUTPUT_END>` marker. This keeps local models from spending a
+turn continuing or reprocessing a huge tool blob.
+
+Workspace path suggestions are local UI affordances. They scan the configured
+workspace for path-like input tokens, skip noisy directories such as `.git`,
+`.openharness`, and `target`, and accept the first visible suggestion with
+`Right`.
+
 ## Model Backends
 
 The default backend is LM Studio or any OpenAI-compatible local server. The

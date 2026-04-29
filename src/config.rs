@@ -60,7 +60,7 @@ impl Default for Config {
                 allow_shell: false,
                 max_tool_turns: default_max_tool_turns(),
                 system_prompt: "You are OpenHarness, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
-                developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel.".to_string(),
+                developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <OPENHARNESS_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details.".to_string(),
             },
         }
     }

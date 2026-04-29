@@ -38,6 +38,9 @@ explicit `/v1/completions` endpoint for servers that accept raw text completions
 Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
 Use `/tools` to inspect the detailed tool catalog exposed to the agent, and
 `/todos` to display the current task todo list.
+Use `/diff` before and after risky work to inspect the workspace diff. Use
+`/checkpoint [label]` to save a non-destructive patch snapshot under
+`.openharness/checkpoints`, and `/checkpoints` to list saved snapshots.
 Use `/settings`, `Tab`, or `F2` to open API settings.
 
 ## Configuration
@@ -81,10 +84,24 @@ server and increase context/token settings on the server side.
 
 - `Tab` or `F2`: switch between Chat and Settings
 - `Enter`: send a chat message or edit/apply a setting
+- `Right`: accept the first workspace path suggestion when one is visible
 - `Up`/`Down`: move through settings
 - `Space`: toggle boolean settings
 - `s`: save settings to TOML
 - `Ctrl-C`: quit
+
+OpenHarness suggests workspace paths while you type path-like tokens such as
+`src/`, `Cargo`, or `docs/read`. Suggestions are read from the configured
+workspace and skip `.git`, `.openharness`, and `target`.
+
+## Safety Commands
+
+- `/diff`: show git status, diff stat, and a truncated tracked diff
+- `/checkpoint [label]`: save the current tracked diff plus status as a patch snapshot
+- `/checkpoints`: list saved checkpoint patch files
+
+Checkpoints do not commit, stash, or roll back anything. They are plain files in
+the workspace so you can inspect them before applying anything manually.
 
 ## Current Scope
 
@@ -102,6 +119,15 @@ The agent can also maintain in-memory task state:
 Editing and shell execution are deliberately gated for a later milestone so the
 harness can grow an explicit approval flow instead of mutating a workspace
 silently.
+
+Large tool calls and tool results render as compact transcript previews with
+size metadata plus first/last snippets. The session still keeps the full tool
+content for the active model loop.
+
+Very large tool results are also compacted before being added back to model
+context, with an explicit end marker. This prevents a large `read_file` from
+turning the next prompt into a wall of source text; the model can use `search`
+or a narrower request if it needs omitted middle sections.
 
 The MVP should stay focused on Harmony-capable `gpt-oss` models behind
 OpenAI-compatible local or remote endpoints. External APIs can fit the same

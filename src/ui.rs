@@ -20,6 +20,7 @@ use crate::{
     config::Config,
     session::{AgentSession, Channel, Role, TurnEvent},
     theme::{StatusKind, Theme},
+    workspace,
 };
 
 mod commands;
@@ -49,6 +50,8 @@ pub struct App {
     config_path: Option<PathBuf>,
     transcript: Vec<TranscriptItem>,
     input: String,
+    path_suggestions: Vec<String>,
+    path_suggestion_range: Option<(usize, usize)>,
     status: String,
     status_kind: StatusKind,
     view: View,
@@ -86,6 +89,8 @@ impl App {
                 "OH! OpenHarness is ready. Type a request, /tools, /todos, /prompt, /settings, /clear, or /quit.",
             )],
             input: String::new(),
+            path_suggestions: Vec::new(),
+            path_suggestion_range: None,
             status: "idle".to_string(),
             status_kind: StatusKind::Idle,
             view: View::Chat,
@@ -132,11 +137,7 @@ impl App {
             self.finish_completed_turn().await?;
 
             terminal.draw(|frame| {
-                let input_height = if self.view == View::Chat && self.input.starts_with('/') {
-                    4
-                } else {
-                    3
-                };
+                let input_height = self.input_height();
                 let areas = app_areas(frame.area(), input_height);
 
                 self.render_header(areas.header, frame);
@@ -178,6 +179,7 @@ impl App {
     async fn handle_chat_key(&mut self, code: KeyCode) -> Result<bool> {
         match code {
             KeyCode::Tab | KeyCode::F(2) => self.view = View::Settings,
+            KeyCode::Right if self.accept_path_suggestion() => {}
             KeyCode::PageUp => self.scroll_up(8),
             KeyCode::PageDown => self.scroll_down(8),
             KeyCode::Home => {
@@ -193,13 +195,18 @@ impl App {
                 self.status = "waiting for current turn".to_string();
                 self.status_kind = StatusKind::Working;
             }
-            KeyCode::Char(ch) => self.input.push(ch),
+            KeyCode::Char(ch) => {
+                self.input.push(ch);
+                self.refresh_path_suggestions();
+            }
             KeyCode::Backspace => {
                 self.input.pop();
+                self.refresh_path_suggestions();
             }
             KeyCode::Enter => {
                 let input = self.input.trim().to_string();
                 self.input.clear();
+                self.clear_path_suggestions();
                 if self.handle_chat_input(input).await? {
                     return Ok(true);
                 }
@@ -218,6 +225,7 @@ impl App {
             "/quit" | "/exit" => return Ok(true),
             "/settings" => {
                 self.view = View::Settings;
+                self.clear_path_suggestions();
                 return Ok(false);
             }
             "/clear" => {
@@ -269,7 +277,24 @@ impl App {
                 self.follow_tail = true;
                 return Ok(false);
             }
+            "/diff" => {
+                self.show_workspace_diff();
+                return Ok(false);
+            }
+            "/checkpoints" => {
+                self.show_checkpoints();
+                return Ok(false);
+            }
             _ => {}
+        }
+
+        if input == "/checkpoint" || input.starts_with("/checkpoint ") {
+            let label = input
+                .strip_prefix("/checkpoint")
+                .map(str::trim)
+                .unwrap_or_default();
+            self.create_checkpoint(label);
+            return Ok(false);
         }
 
         self.start_async_turn(input)?;
@@ -282,8 +307,14 @@ impl App {
         }
 
         match code {
-            KeyCode::Tab | KeyCode::F(2) => self.view = View::Chat,
-            KeyCode::Esc => self.view = View::Chat,
+            KeyCode::Tab | KeyCode::F(2) => {
+                self.view = View::Chat;
+                self.refresh_path_suggestions();
+            }
+            KeyCode::Esc => {
+                self.view = View::Chat;
+                self.refresh_path_suggestions();
+            }
             KeyCode::Up => self.select_previous_setting(),
             KeyCode::Down => self.select_next_setting(),
             KeyCode::Char('k') => self.select_previous_setting(),
@@ -449,6 +480,116 @@ impl App {
         self.follow_tail = true;
     }
 
+    fn input_height(&self) -> u16 {
+        if self.view == View::Chat && self.input.starts_with('/') {
+            4
+        } else if self.view == View::Chat && !self.path_suggestions.is_empty() {
+            3 + self.path_suggestions.len().min(5) as u16
+        } else {
+            3
+        }
+    }
+
+    fn refresh_path_suggestions(&mut self) {
+        if self.view != View::Chat || self.input.starts_with('/') {
+            self.clear_path_suggestions();
+            return;
+        }
+
+        let Some((range, prefix)) = current_path_prefix(&self.input) else {
+            self.clear_path_suggestions();
+            return;
+        };
+
+        match workspace::path_suggestions(&self.config.harness.workspace, &prefix, 5) {
+            Ok(suggestions) => {
+                self.path_suggestions = suggestions;
+                self.path_suggestion_range = Some(range);
+            }
+            Err(_) => self.clear_path_suggestions(),
+        }
+    }
+
+    fn clear_path_suggestions(&mut self) {
+        self.path_suggestions.clear();
+        self.path_suggestion_range = None;
+    }
+
+    fn accept_path_suggestion(&mut self) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        let Some((start, end)) = self.path_suggestion_range else {
+            return false;
+        };
+        let Some(suggestion) = self.path_suggestions.first().cloned() else {
+            return false;
+        };
+        if start > end || end > self.input.len() {
+            self.clear_path_suggestions();
+            return false;
+        }
+
+        self.input.replace_range(start..end, &suggestion);
+        self.refresh_path_suggestions();
+        true
+    }
+
+    fn show_workspace_diff(&mut self) {
+        match workspace::diff_report(&self.config.harness.workspace) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Workspace Diff", report));
+                self.status = "diff ready".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "diff failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn create_checkpoint(&mut self, label: &str) {
+        let label = if label.is_empty() { None } else { Some(label) };
+        match workspace::create_checkpoint(&self.config.harness.workspace, label) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Checkpoint", report));
+                self.status = "checkpoint saved".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "checkpoint failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn show_checkpoints(&mut self) {
+        match workspace::list_checkpoints(&self.config.harness.workspace) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Checkpoints", report));
+                self.status = "checkpoints listed".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "checkpoints failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
     fn refresh_session_stats(&mut self) {
         if let Some(session) = &self.session {
             self.config = session.config().clone();
@@ -537,6 +678,7 @@ impl App {
             session.update_config(config);
             self.refresh_session_stats();
         }
+        self.refresh_path_suggestions();
         self.status = "setting updated".to_string();
         self.status_kind = StatusKind::Ok;
     }
@@ -567,4 +709,38 @@ impl App {
     fn is_busy(&self) -> bool {
         self.send_task.is_some()
     }
+}
+
+fn current_path_prefix(input: &str) -> Option<((usize, usize), String)> {
+    let token_start = input
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    let token = input[token_start..].trim_matches('"');
+    if token.len() < 2 || token.starts_with('-') {
+        return None;
+    }
+
+    let token_offset = input[token_start..].find(token).unwrap_or(0);
+    let start = token_start + token_offset + usize::from(token.starts_with('@'));
+    let end = token_start + token_offset + token.len();
+    let prefix = token.strip_prefix('@').unwrap_or(token);
+
+    if !is_path_like(prefix) {
+        return None;
+    }
+
+    Some(((start, end), prefix.to_string()))
+}
+
+fn is_path_like(token: &str) -> bool {
+    token.len() >= 2
+        && !token.starts_with('/')
+        && (token.contains('/')
+            || token.contains('.')
+            || token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
 }

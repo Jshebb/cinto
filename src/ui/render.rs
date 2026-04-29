@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph, Wrap},
@@ -12,7 +12,7 @@ use super::{
     settings::SETTINGS,
     transcript::{markdown_bold_spans, wrap_text},
 };
-use crate::theme::{BRAND_NAME, StatusKind, spinner_frame, thinking_flavor};
+use crate::theme::{BRAND_NAME, StatusKind, Theme, spinner_frame, thinking_flavor};
 
 impl App {
     pub(super) fn render_header(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -64,10 +64,16 @@ impl App {
     }
 
     pub(super) fn render_chat(&mut self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let [messages_area, rail_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(48), Constraint::Length(24)])
-            .areas(area);
+        let show_rail = area.width >= 88;
+        let (messages_area, rail_area) = if show_rail {
+            let [messages_area, rail_area] = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(56), Constraint::Length(24)])
+                .areas(area);
+            (messages_area, Some(rail_area))
+        } else {
+            (area, None)
+        };
 
         let messages_inner = messages_area.inner(Margin {
             vertical: 1,
@@ -87,21 +93,28 @@ impl App {
             .scroll((self.chat_scroll, 0));
         frame.render_widget(transcript, messages_inner);
 
-        let rail = Paragraph::new(self.context_rail_lines()).wrap(Wrap { trim: false });
-        frame.render_widget(
-            rail,
-            rail_area.inner(Margin {
+        if let Some(rail_area) = rail_area {
+            let rail_inner = rail_area.inner(Margin {
                 vertical: 1,
                 horizontal: 1,
-            }),
-        );
+            });
+            let rail = Paragraph::new(self.context_rail_lines(rail_inner.height))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(rail, rail_inner);
+        }
     }
 
     pub(super) fn render_settings(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let [settings_area, help_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-            .areas(area);
+        let show_help = area.width >= 96;
+        let (settings_area, help_area) = if show_help {
+            let [settings_area, help_area] = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+                .areas(area);
+            (settings_area, Some(help_area))
+        } else {
+            (area, None)
+        };
         let settings_inner = settings_area.inner(Margin {
             vertical: 1,
             horizontal: 2,
@@ -140,45 +153,36 @@ impl App {
             ]));
         }
 
-        let settings = Paragraph::new(rows).wrap(Wrap { trim: false });
+        let settings_scroll = selected_scroll_offset(self.selected_setting, settings_inner.height);
+        let settings = Paragraph::new(rows)
+            .wrap(Wrap { trim: false })
+            .scroll((settings_scroll, 0));
         frame.render_widget(settings, settings_inner);
 
-        let path = self
-            .config_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "no config path available".to_string());
-        let lock_line = if locked {
-            "Settings are locked while a turn is running."
-        } else {
-            "Edit endpoint, model, auth env, and runtime limits here."
-        };
-        let help = Paragraph::new(vec![
-            Line::styled("API Access", self.theme.brand()),
-            Line::raw(""),
-            Line::raw(lock_line),
-            Line::raw(""),
-            Line::raw("api key env stores an environment variable name, not the secret."),
-            Line::raw(""),
-            Line::styled("Keys", self.theme.brand()),
-            Line::raw("Up/Down or j/k: select"),
-            Line::raw("Enter: edit/cycle"),
-            Line::raw("Esc: cancel/back"),
-            Line::raw("Space: toggle/cycle"),
-            Line::raw("s: save TOML"),
-            Line::raw("Tab/F2: chat"),
-            Line::raw(""),
-            Line::styled("Config Path", self.theme.brand()),
-            Line::raw(path),
-        ])
-        .wrap(Wrap { trim: false });
-        frame.render_widget(
-            help,
-            help_area.inner(Margin {
+        if let Some(help_area) = help_area {
+            let path = self
+                .config_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "no config path available".to_string());
+            let lock_line = if locked {
+                "Settings are locked while a turn is running."
+            } else {
+                "Edit endpoint, model, auth env, and runtime limits here."
+            };
+            let help_inner = help_area.inner(Margin {
                 vertical: 1,
                 horizontal: 1,
-            }),
-        );
+            });
+            let help = Paragraph::new(settings_help_lines(
+                &self.theme,
+                lock_line,
+                path,
+                help_inner.height,
+            ))
+            .wrap(Wrap { trim: false });
+            frame.render_widget(help, help_inner);
+        }
     }
 
     pub(super) fn render_input(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -229,18 +233,30 @@ impl App {
             );
         }
 
-        if area.height == 1 && self.view == View::Chat && self.input.starts_with('/') && !working {
-            content = vec![Line::styled(
-                slash_command_tips(self.input.trim(), area.width),
-                self.theme.dim_style(),
-            )];
+        if area.height == 1 && self.view == View::Chat && !working {
+            if self.input.starts_with('/') {
+                content = vec![Line::styled(
+                    slash_command_tips(self.input.trim(), area.width),
+                    self.theme.dim_style(),
+                )];
+            } else if let Some(suggestion) = self.path_suggestions.first() {
+                content = vec![Line::styled(
+                    format!("complete: {suggestion}"),
+                    self.theme.dim_style(),
+                )];
+            }
         }
 
+        let has_block = area.height >= 4 || !self.input.starts_with('/');
         let mut input = Paragraph::new(content).style(style);
-        if area.height >= 4 || !self.input.starts_with('/') {
+        if has_block {
             input = input.block(Block::default().title(title).borders(Borders::ALL));
         }
         frame.render_widget(input, area);
+
+        if !working && (self.view == View::Chat || self.setting_editor.is_some()) {
+            self.render_input_cursor(area, has_block, frame);
+        }
     }
 
     pub(super) fn render_footer(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -254,7 +270,7 @@ impl App {
             .areas(area);
         let ratio = token_ratio(self.estimated_tokens, self.config.model.context_window);
         let token_label = format!(
-            "ctx ~{} / {}",
+            "ctx {} / {}",
             self.estimated_tokens, self.config.model.context_window
         );
         let gauge = Gauge::default()
@@ -308,7 +324,7 @@ impl App {
         lines
     }
 
-    fn context_rail_lines(&self) -> Vec<Line<'static>> {
+    fn context_rail_lines(&self, visible_height: u16) -> Vec<Line<'static>> {
         let auth = self
             .config
             .model
@@ -324,48 +340,137 @@ impl App {
             .unwrap_or_else(|| "-".to_string());
         let state = if self.is_busy() { "running" } else { "ready" };
 
-        vec![
+        let mut lines = vec![
             Line::styled("OH! OpenHarness", self.theme.brand()),
             Line::raw(""),
             Line::styled("Session", self.theme.brand()),
-            Line::raw(format!("state: {state}")),
-            Line::raw(format!("elapsed: {elapsed}")),
+            Line::raw(format!("state: {state}  elapsed: {elapsed}")),
             Line::raw(format!("effort: {}", self.config.model.thinking_effort)),
-            Line::raw(format!("messages: {}", self.history_len)),
-            Line::raw(format!("todos: {}", self.todo_status_line)),
             Line::raw(format!(
-                "ctx: ~{} / {}",
+                "messages: {}  todos: {}",
+                self.history_len, self.todo_status_line
+            )),
+            Line::raw(format!(
+                "ctx: {} / {}",
                 self.estimated_tokens, self.config.model.context_window
             )),
             Line::raw(format!("tools: {}", self.config.harness.max_tool_turns)),
             Line::raw(""),
             Line::styled("Model", self.theme.brand()),
             Line::raw(compact(&self.config.model.model, 18)),
-            Line::raw(format!("out: {}", self.config.model.max_tokens)),
-            Line::raw(format!("temp: {:.2}", self.config.model.temperature)),
-            Line::raw(format!("stream: {}", self.config.model.stream)),
-            Line::raw(format!("auth: {auth}")),
-            Line::raw(""),
-            Line::styled("Commands", self.theme.brand()),
-            Line::raw("/settings"),
-            Line::raw("/prompt"),
-            Line::raw("/tools"),
-            Line::raw("/todos"),
-            Line::raw("/clear"),
-            Line::raw("/quit"),
-        ]
+            Line::raw(format!(
+                "out: {}  temp: {:.2}",
+                self.config.model.max_tokens, self.config.model.temperature
+            )),
+            Line::raw(format!(
+                "stream: {}  auth: {auth}",
+                self.config.model.stream
+            )),
+        ];
+
+        if visible_height as usize >= lines.len() + 5 {
+            lines.extend([
+                Line::raw(""),
+                Line::styled("Commands", self.theme.brand()),
+                Line::raw("/settings  /prompt"),
+                Line::raw("/tools     /todos"),
+                Line::raw("/diff      /checkpoint"),
+                Line::raw("/clear     /quit"),
+            ]);
+        }
+
+        lines
     }
 
     fn chat_input_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec![Line::raw(self.input.clone())];
-        if !self.input.starts_with('/') {
+        if self.input.starts_with('/') {
+            lines.push(Line::styled(
+                slash_command_tips(self.input.trim(), width),
+                self.theme.dim_style(),
+            ));
             return lines;
         }
 
-        lines.push(Line::styled(
-            slash_command_tips(self.input.trim(), width),
-            self.theme.dim_style(),
-        ));
+        for (index, suggestion) in self.path_suggestions.iter().enumerate() {
+            let marker = if index == 0 { ">" } else { " " };
+            let style = if index == 0 {
+                self.theme.brand()
+            } else {
+                self.theme.dim_style()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(" ", self.theme.dim_style()),
+                Span::styled(compact(suggestion, width.saturating_sub(3) as usize), style),
+            ]));
+        }
         lines
     }
+
+    fn render_input_cursor(&self, area: Rect, has_block: bool, frame: &mut ratatui::Frame<'_>) {
+        if area.is_empty() {
+            return;
+        }
+
+        let (x_offset, y_offset, width) = if has_block {
+            (1, 1, area.width.saturating_sub(2))
+        } else {
+            (0, 0, area.width)
+        };
+        if width == 0 || area.height <= y_offset {
+            return;
+        }
+
+        let cursor_chars = match self.view {
+            View::Chat => self.input.chars().count(),
+            View::Settings => self
+                .setting_editor
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .count(),
+        };
+        let cursor_x = cursor_chars.min(width.saturating_sub(1) as usize) as u16;
+        frame.set_cursor_position(Position {
+            x: area.x.saturating_add(x_offset).saturating_add(cursor_x),
+            y: area.y.saturating_add(y_offset),
+        });
+    }
+}
+
+fn selected_scroll_offset(selected: usize, visible_height: u16) -> u16 {
+    let visible = visible_height.max(1) as usize;
+    selected.saturating_add(1).saturating_sub(visible) as u16
+}
+
+fn settings_help_lines(
+    theme: &Theme,
+    lock_line: &str,
+    path: String,
+    visible_height: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled("API Access", theme.brand()),
+        Line::raw(lock_line.to_string()),
+        Line::raw("api key env stores an env var name"),
+        Line::raw(""),
+        Line::styled("Keys", theme.brand()),
+        Line::raw("Up/Down or j/k: select"),
+        Line::raw("Enter: edit/cycle"),
+        Line::raw("Esc: cancel/back"),
+        Line::raw("Space: toggle/cycle"),
+        Line::raw("s: save TOML"),
+        Line::raw("Tab/F2: chat"),
+    ];
+
+    if visible_height as usize >= lines.len() + 3 {
+        lines.extend([
+            Line::raw(""),
+            Line::styled("Config Path", theme.brand()),
+            Line::raw(path),
+        ]);
+    }
+
+    lines
 }

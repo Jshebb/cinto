@@ -112,7 +112,7 @@ fn default_tools() -> Vec<ToolSpec> {
         },
         ToolCatalogEntry {
             name: "functions.read_file",
-            description: "Read a UTF-8 text file from the workspace. The `path` must be relative and cannot escape the workspace.",
+            description: "Read a UTF-8 text file from the workspace. The `path` must be relative and cannot escape the workspace. Large results may be compacted in model context; use search or narrower follow-up requests for omitted details.",
             schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
         },
         ToolCatalogEntry {

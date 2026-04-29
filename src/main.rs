@@ -4,6 +4,7 @@ mod model;
 mod session;
 mod theme;
 mod ui;
+mod workspace;
 
 use std::path::PathBuf;
 

@@ -8,6 +8,12 @@ use crate::{
     theme::{RoleKind, StatusKind, Theme},
 };
 
+const MAX_TOOL_CALL_DISPLAY_CHARS: usize = 900;
+const MAX_TOOL_CALL_DISPLAY_LINES: usize = 18;
+const MAX_TOOL_RESULT_DISPLAY_CHARS: usize = 1_600;
+const MAX_TOOL_RESULT_DISPLAY_LINES: usize = 36;
+const MAX_TOOL_PREVIEW_LINE_CHARS: usize = 140;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TranscriptRole {
     User,
@@ -67,12 +73,12 @@ impl TranscriptItem {
             (Role::Assistant, Some(Channel::Commentary), Some(recipient)) => Self {
                 role: TranscriptRole::Tool,
                 title: format!("Tool call {}", clean_recipient(recipient)),
-                body: message.content.clone(),
+                body: truncate_tool_body(&message.content, ToolPreviewKind::Call),
             },
             (Role::Tool, _, Some(recipient)) => Self {
                 role: TranscriptRole::Tool,
                 title: format!("Tool result {}", clean_recipient(recipient)),
-                body: message.content.clone(),
+                body: truncate_tool_body(&message.content, ToolPreviewKind::Result),
             },
             _ => Self {
                 role: TranscriptRole::System,
@@ -178,4 +184,125 @@ fn clean_recipient(recipient: &str) -> String {
         .unwrap_or(recipient)
         .trim()
         .to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolPreviewKind {
+    Call,
+    Result,
+}
+
+impl ToolPreviewKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Call => "Tool call",
+            Self::Result => "Tool output",
+        }
+    }
+
+    fn max_chars(self) -> usize {
+        match self {
+            Self::Call => MAX_TOOL_CALL_DISPLAY_CHARS,
+            Self::Result => MAX_TOOL_RESULT_DISPLAY_CHARS,
+        }
+    }
+
+    fn max_lines(self) -> usize {
+        match self {
+            Self::Call => MAX_TOOL_CALL_DISPLAY_LINES,
+            Self::Result => MAX_TOOL_RESULT_DISPLAY_LINES,
+        }
+    }
+
+    fn head_lines(self) -> usize {
+        match self {
+            Self::Call => 8,
+            Self::Result => 14,
+        }
+    }
+
+    fn tail_lines(self) -> usize {
+        match self {
+            Self::Call => 3,
+            Self::Result => 5,
+        }
+    }
+}
+
+fn truncate_tool_body(body: &str, kind: ToolPreviewKind) -> String {
+    let line_count = body.lines().count();
+    let char_count = body.chars().count();
+    if line_count <= kind.max_lines() && char_count <= kind.max_chars() {
+        return body.to_string();
+    }
+
+    if line_count <= 1 {
+        return single_line_tool_preview(body, kind, char_count);
+    }
+
+    let lines = body.lines().collect::<Vec<_>>();
+    let head_len = kind.head_lines().min(lines.len());
+    let tail_len = kind.tail_lines().min(lines.len().saturating_sub(head_len));
+    let omitted = lines.len().saturating_sub(head_len + tail_len);
+
+    let mut output = preview_header(kind, line_count, char_count, head_len, tail_len);
+    output.push_str("\n--- first lines ---\n");
+    for line in lines.iter().take(head_len) {
+        output.push_str(&clip_preview_line(line));
+        output.push('\n');
+    }
+
+    output.push_str(&format!("--- omitted {omitted} lines ---\n"));
+
+    if tail_len > 0 {
+        output.push_str("--- last lines ---\n");
+        for line in lines.iter().skip(lines.len() - tail_len) {
+            output.push_str(&clip_preview_line(line));
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn preview_header(
+    kind: ToolPreviewKind,
+    line_count: usize,
+    char_count: usize,
+    head_len: usize,
+    tail_len: usize,
+) -> String {
+    format!(
+        "**{} truncated for display**\noriginal: {line_count} lines / {char_count} chars\npreview: first {head_len} lines + last {tail_len} lines\nfull content remains in session context\n",
+        kind.label()
+    )
+}
+
+fn single_line_tool_preview(body: &str, kind: ToolPreviewKind, char_count: usize) -> String {
+    let head_chars = (kind.max_chars() * 3 / 4).min(char_count);
+    let tail_chars = (kind.max_chars() / 4).min(char_count.saturating_sub(head_chars));
+    let head = body.chars().take(head_chars).collect::<String>();
+    let tail = body
+        .chars()
+        .skip(char_count.saturating_sub(tail_chars))
+        .collect::<String>();
+    let omitted = char_count.saturating_sub(head_chars + tail_chars);
+
+    format!(
+        "**{} truncated for display**\noriginal: 1 line / {char_count} chars\npreview: first {head_chars} chars + last {tail_chars} chars\nfull content remains in session context\n\n--- preview ---\n{}\n--- omitted {omitted} chars ---\n{}",
+        kind.label(),
+        clip_preview_line(&head),
+        clip_preview_line(&tail)
+    )
+}
+
+fn clip_preview_line(line: &str) -> String {
+    let char_count = line.chars().count();
+    if char_count <= MAX_TOOL_PREVIEW_LINE_CHARS {
+        return line.to_string();
+    }
+
+    let keep = MAX_TOOL_PREVIEW_LINE_CHARS.saturating_sub(24);
+    let preview = line.chars().take(keep).collect::<String>();
+    format!("{preview} ... [line clipped]")
 }

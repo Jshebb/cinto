@@ -15,6 +15,10 @@ use crate::{
     model::ModelClient,
 };
 
+const MAX_TOOL_CONTEXT_CHARS: usize = 8_000;
+const MAX_TOOL_CONTEXT_LINES: usize = 220;
+const TOOL_OUTPUT_END: &str = "<OPENHARNESS_TOOL_OUTPUT_END>";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
@@ -214,6 +218,7 @@ impl AgentSession {
                                 let output = self
                                     .execute_tool(&recipient, &arguments)
                                     .unwrap_or_else(|error| format!("tool error: {error:#}"));
+                                let output = compact_tool_context(&recipient, &output);
                                 let tool = Message::tool(recipient, output);
                                 self.history.push(tool.clone());
                                 let _ = event_tx.send(TurnEvent::Message(tool));
@@ -283,7 +288,15 @@ impl AgentSession {
             .and_then(Value::as_str)
             .context("read_file requires path")?;
         let path = self.workspace_path(path)?;
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        Ok(format!(
+            "path: {}\nbytes: {}\nlines: {}\n\n{}",
+            path.display(),
+            contents.len(),
+            contents.lines().count(),
+            contents
+        ))
     }
 
     fn search(&self, arguments: &str) -> Result<String> {
@@ -369,6 +382,47 @@ impl AgentSession {
 
 fn parse_json(arguments: &str) -> Result<Value> {
     serde_json::from_str(arguments.trim()).context("tool arguments must be JSON")
+}
+
+fn compact_tool_context(recipient: &str, output: &str) -> String {
+    let line_count = output.lines().count();
+    let char_count = output.chars().count();
+    if line_count <= MAX_TOOL_CONTEXT_LINES && char_count <= MAX_TOOL_CONTEXT_CHARS {
+        return format!("{output}\n\n{TOOL_OUTPUT_END}");
+    }
+
+    let lines = output.lines().collect::<Vec<_>>();
+    let head_len = 80.min(lines.len());
+    let tail_len = 30.min(lines.len().saturating_sub(head_len));
+    let omitted = lines.len().saturating_sub(head_len + tail_len);
+
+    let mut compact = format!(
+        "OpenHarness compacted a large tool result before adding it to model context.\nrecipient: {}\noriginal: {} lines / {} chars\nincluded: first {} lines + last {} lines\nIf you need details from the omitted middle, use search or request a narrower file/range.\n\n--- first lines ---\n",
+        clean_recipient(recipient),
+        line_count,
+        char_count,
+        head_len,
+        tail_len
+    );
+
+    for line in lines.iter().take(head_len) {
+        compact.push_str(line);
+        compact.push('\n');
+    }
+
+    compact.push_str(&format!("--- omitted {omitted} lines ---\n"));
+
+    if tail_len > 0 {
+        compact.push_str("--- last lines ---\n");
+        for line in lines.iter().skip(lines.len() - tail_len) {
+            compact.push_str(line);
+            compact.push('\n');
+        }
+    }
+
+    compact.push_str("\n");
+    compact.push_str(TOOL_OUTPUT_END);
+    compact
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
