@@ -19,9 +19,11 @@ pub(super) enum SettingField {
     Workspace,
     EditApproval,
     AllowShell,
+    SystemPrompt,
+    DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 13] = [
+pub(super) const SETTINGS: [SettingField; 15] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::ApiKeyEnv,
@@ -35,6 +37,8 @@ pub(super) const SETTINGS: [SettingField; 13] = [
     SettingField::Workspace,
     SettingField::EditApproval,
     SettingField::AllowShell,
+    SettingField::SystemPrompt,
+    SettingField::DeveloperPrompt,
 ];
 
 const THINKING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
@@ -55,6 +59,8 @@ impl SettingField {
             SettingField::Workspace => "workspace",
             SettingField::EditApproval => "edit approval",
             SettingField::AllowShell => "allow shell",
+            SettingField::SystemPrompt => "system prompt",
+            SettingField::DeveloperPrompt => "developer prompt",
         }
     }
 
@@ -73,6 +79,8 @@ impl SettingField {
             SettingField::Workspace => config.harness.workspace.display().to_string(),
             SettingField::EditApproval => config.harness.require_edit_approval.to_string(),
             SettingField::AllowShell => config.harness.allow_shell.to_string(),
+            SettingField::SystemPrompt => escape_newlines(&config.harness.system_prompt),
+            SettingField::DeveloperPrompt => escape_newlines(&config.harness.developer_prompt),
         }
     }
 
@@ -135,10 +143,42 @@ impl SettingField {
                     .parse()
                     .context("allow shell must be true or false")?;
             }
+            SettingField::SystemPrompt => {
+                config.harness.system_prompt = unescape_newlines(&non_empty(value, "system prompt")?);
+            }
+            SettingField::DeveloperPrompt => {
+                config.harness.developer_prompt =
+                    unescape_newlines(&non_empty(value, "developer prompt")?);
+            }
         }
 
         Ok(())
     }
+}
+
+fn escape_newlines(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn unescape_newlines(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 pub(super) fn next_thinking_effort(current: &str) -> String {

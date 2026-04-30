@@ -151,6 +151,11 @@ impl App {
 
         let mut rows = Vec::new();
         let locked = self.is_busy();
+        let label_prefix_width: u16 = 18;
+        let value_budget = settings_inner
+            .width
+            .saturating_sub(label_prefix_width)
+            .max(8) as usize;
         for (index, field) in SETTINGS.iter().enumerate() {
             let selected = index == self.selected_setting;
             let editing = selected && self.setting_editor.is_some();
@@ -160,7 +165,7 @@ impl App {
                     .unwrap_or_default()
                     .to_string()
             } else {
-                field.value(&self.config)
+                truncate_for_width(&field.value(&self.config), value_budget)
             };
             let marker = if selected { ">" } else { " " };
             let label_style = if selected {
@@ -183,9 +188,7 @@ impl App {
         }
 
         let settings_scroll = selected_scroll_offset(self.selected_setting, settings_inner.height);
-        let settings = Paragraph::new(rows)
-            .wrap(Wrap { trim: false })
-            .scroll((settings_scroll, 0));
+        let settings = Paragraph::new(rows).scroll((settings_scroll, 0));
         frame.render_widget(settings, settings_inner);
 
         if let Some(help_area) = help_area {
@@ -1083,6 +1086,21 @@ fn hard_wrap_preserving(line: &str, width: usize) -> Vec<String> {
         .chunks(width)
         .map(|chunk| chunk.iter().collect::<String>())
         .collect()
+}
+
+fn truncate_for_width(value: &str, budget: usize) -> String {
+    let single_line = value.replace('\n', " ");
+    let count = single_line.chars().count();
+    if count <= budget {
+        return single_line;
+    }
+    if budget <= 1 {
+        return single_line.chars().take(budget).collect();
+    }
+    let take = budget.saturating_sub(1);
+    let mut out: String = single_line.chars().take(take).collect();
+    out.push('…');
+    out
 }
 
 fn selected_scroll_offset(selected: usize, visible_height: u16) -> u16 {
