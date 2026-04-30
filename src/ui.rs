@@ -35,7 +35,7 @@ mod transcript;
 
 use self::{
     layout::app_areas,
-    settings::{SETTINGS, SettingField, next_thinking_effort},
+    settings::{SETTINGS, SettingField, next_format, next_thinking_effort},
     transcript::TranscriptItem,
 };
 
@@ -884,6 +884,7 @@ impl App {
                 | SettingField::EditApproval
                 | SettingField::Stream
                 | SettingField::ThinkingEffort
+                | SettingField::Format
         ) {
             return self.toggle_setting();
         }
@@ -913,6 +914,9 @@ impl App {
             }
             SettingField::ThinkingEffort => {
                 config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);
+            }
+            SettingField::Format => {
+                config.model.format = next_format(&config.model.format);
             }
             _ => return Ok(()),
         }

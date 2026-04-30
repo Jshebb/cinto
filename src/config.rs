@@ -13,6 +13,8 @@ pub struct Config {
 pub struct ModelConfig {
     pub endpoint: String,
     pub model: String,
+    #[serde(default = "default_format")]
+    pub format: String,
     #[serde(default)]
     pub api_key_env: Option<String>,
     pub max_tokens: u32,
@@ -48,6 +50,7 @@ impl Default for Config {
             model: ModelConfig {
                 endpoint: "http://127.0.0.1:1234".to_string(),
                 model: "openai/gpt-oss-20b".to_string(),
+                format: default_format(),
                 api_key_env: None,
                 max_tokens: 4096,
                 temperature: 0.2,
@@ -124,6 +127,10 @@ fn default_require_edit_approval() -> bool {
 
 fn default_thinking_effort() -> String {
     "medium".to_string()
+}
+
+fn default_format() -> String {
+    "harmony".to_string()
 }
 
 fn default_stream() -> bool {

@@ -8,6 +8,7 @@ use crate::config::Config;
 pub(super) enum SettingField {
     Endpoint,
     Model,
+    Format,
     ApiKeyEnv,
     MaxTokens,
     Temperature,
@@ -23,9 +24,10 @@ pub(super) enum SettingField {
     DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 15] = [
+pub(super) const SETTINGS: [SettingField; 16] = [
     SettingField::Endpoint,
     SettingField::Model,
+    SettingField::Format,
     SettingField::ApiKeyEnv,
     SettingField::MaxTokens,
     SettingField::Temperature,
@@ -42,12 +44,14 @@ pub(super) const SETTINGS: [SettingField; 15] = [
 ];
 
 const THINKING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
+const FORMATS: [&str; 2] = ["harmony", "openai-tools"];
 
 impl SettingField {
     pub(super) fn label(self) -> &'static str {
         match self {
             SettingField::Endpoint => "endpoint",
             SettingField::Model => "model",
+            SettingField::Format => "format",
             SettingField::ApiKeyEnv => "api key env",
             SettingField::MaxTokens => "max tokens",
             SettingField::Temperature => "temperature",
@@ -68,6 +72,7 @@ impl SettingField {
         match self {
             SettingField::Endpoint => config.model.endpoint.clone(),
             SettingField::Model => config.model.model.clone(),
+            SettingField::Format => config.model.format.clone(),
             SettingField::ApiKeyEnv => config.model.api_key_env.clone().unwrap_or_default(),
             SettingField::MaxTokens => config.model.max_tokens.to_string(),
             SettingField::Temperature => format!("{:.2}", config.model.temperature),
@@ -88,6 +93,13 @@ impl SettingField {
         match self {
             SettingField::Endpoint => config.model.endpoint = non_empty(value, "endpoint")?,
             SettingField::Model => config.model.model = non_empty(value, "model")?,
+            SettingField::Format => {
+                let value = value.trim().to_ascii_lowercase();
+                if !FORMATS.contains(&value.as_str()) {
+                    return Err(anyhow!("format must be one of harmony, openai-tools"));
+                }
+                config.model.format = value;
+            }
             SettingField::ApiKeyEnv => {
                 let value = value.trim().to_string();
                 config.model.api_key_env = if value.is_empty() { None } else { Some(value) };
@@ -188,6 +200,15 @@ pub(super) fn next_thinking_effort(current: &str) -> String {
         .position(|effort| *effort == current)
         .unwrap_or(1);
     THINKING_EFFORTS[(index + 1) % THINKING_EFFORTS.len()].to_string()
+}
+
+pub(super) fn next_format(current: &str) -> String {
+    let current = current.trim().to_ascii_lowercase();
+    let index = FORMATS
+        .iter()
+        .position(|format| *format == current)
+        .unwrap_or(0);
+    FORMATS[(index + 1) % FORMATS.len()].to_string()
 }
 
 fn non_empty(value: String, label: &str) -> Result<String> {
