@@ -2,7 +2,7 @@
   "name": "@cinto/linux-arm64",
   "version": "0.1.0",
   "description": "Linux arm64 binary for cinto",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "os": ["linux"],
   "cpu": ["arm64"],
   "files": ["bin/cinto"]

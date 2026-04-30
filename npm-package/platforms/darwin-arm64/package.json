@@ -2,7 +2,7 @@
   "name": "@cinto/darwin-arm64",
   "version": "0.1.0",
   "description": "macOS arm64 binary for cinto",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "files": ["bin/cinto"]
