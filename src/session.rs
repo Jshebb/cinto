@@ -406,6 +406,7 @@ impl AgentSession {
             .arg("--hidden")
             .arg("--glob")
             .arg("!.git")
+            .arg("--")
             .arg(query)
             .arg(path)
             .output()
