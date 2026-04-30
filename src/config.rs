@@ -59,8 +59,8 @@ impl Default for Config {
                 workspace,
                 allow_shell: false,
                 max_tool_turns: default_max_tool_turns(),
-                system_prompt: "You are OpenHarness, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
-                developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <OPENHARNESS_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details.".to_string(),
+                system_prompt: "You are Cinto, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
+                developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <CINTO_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details.".to_string(),
             },
         }
     }
@@ -99,7 +99,7 @@ impl Config {
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("openharness").join("config.toml"))
+        dirs::config_dir().map(|dir| dir.join("cinto").join("config.toml"))
     }
 }
 
@@ -130,12 +130,12 @@ mod tests {
     #[test]
     fn saves_and_loads_config() {
         let path = std::env::temp_dir().join(format!(
-            "openharness-config-test-{}.toml",
+            "cinto-config-test-{}.toml",
             std::process::id()
         ));
         let mut config = Config::default();
         config.model.endpoint = "http://localhost:9000/v1/completions".to_string();
-        config.model.api_key_env = Some("OPENHARNESS_TEST_KEY".to_string());
+        config.model.api_key_env = Some("CINTO_TEST_KEY".to_string());
 
         let saved = config.save(Some(path.clone())).expect("save config");
         let loaded = Config::load(Some(path.clone())).expect("load config");

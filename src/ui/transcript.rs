@@ -2,6 +2,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::Span,
 };
+use serde_json::Value;
 
 use crate::{
     session::{Channel, Message, Role},
@@ -70,16 +71,26 @@ impl TranscriptItem {
                 title: "Assistant".to_string(),
                 body: message.content.clone(),
             },
-            (Role::Assistant, Some(Channel::Commentary), Some(recipient)) => Self {
-                role: TranscriptRole::Tool,
-                title: format!("Tool call {}", clean_recipient(recipient)),
-                body: truncate_tool_body(&message.content, ToolPreviewKind::Call),
-            },
-            (Role::Tool, _, Some(recipient)) => Self {
-                role: TranscriptRole::Tool,
-                title: format!("Tool result {}", clean_recipient(recipient)),
-                body: truncate_tool_body(&message.content, ToolPreviewKind::Result),
-            },
+            (Role::Assistant, Some(Channel::Commentary), Some(recipient)) => {
+                let name = clean_recipient(recipient);
+                let short = strip_functions_prefix(&name);
+                let body = format_tool_call_body(short, &message.content);
+                Self {
+                    role: TranscriptRole::Tool,
+                    title: format!("→ {short}"),
+                    body,
+                }
+            }
+            (Role::Tool, _, Some(recipient)) => {
+                let name = clean_recipient(recipient);
+                let short = strip_functions_prefix(&name);
+                let (title_suffix, body) = format_tool_result(short, &message.content);
+                Self {
+                    role: TranscriptRole::Tool,
+                    title: format!("← {short}{title_suffix}"),
+                    body,
+                }
+            }
             _ => Self {
                 role: TranscriptRole::System,
                 title: "Message".to_string(),
@@ -109,6 +120,29 @@ impl TranscriptRole {
             TranscriptRole::Error => theme.status_style(StatusKind::Error),
         }
     }
+}
+
+pub(super) fn sanitize_stream_body(body: &str) -> String {
+    const MSG: &str = "<|message|>";
+    let Some(idx) = body.rfind(MSG) else {
+        return String::new();
+    };
+    let tail = &body[idx + MSG.len()..];
+
+    let mut out = String::with_capacity(tail.len());
+    let mut rest = tail;
+    while let Some(start) = rest.find("<|") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("|>") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(super) fn wrap_text(text: &str, width: u16) -> Vec<String> {
@@ -186,6 +220,84 @@ fn clean_recipient(recipient: &str) -> String {
         .to_string()
 }
 
+fn strip_functions_prefix(name: &str) -> &str {
+    name.strip_prefix("functions.").unwrap_or(name)
+}
+
+fn format_tool_call_body(tool: &str, raw_args: &str) -> String {
+    let parsed: Option<Value> = serde_json::from_str(raw_args.trim()).ok();
+    match (tool, parsed.as_ref()) {
+        ("read_file", Some(v)) => {
+            let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
+            format!("path  {path}")
+        }
+        ("list_files", Some(v)) => {
+            let path = v.get("path").and_then(Value::as_str).unwrap_or(".");
+            format!("path  {path}")
+        }
+        ("search", Some(v)) => {
+            let query = v.get("query").and_then(Value::as_str).unwrap_or("?");
+            let path = v.get("path").and_then(Value::as_str).unwrap_or(".");
+            format!("query  \"{query}\"  in  {path}")
+        }
+        ("todo_write", Some(v)) => {
+            let count = v
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0);
+            let plural = if count == 1 { "item" } else { "items" };
+            format!("write  {count} {plural}")
+        }
+        ("todo_read", _) => "read".to_string(),
+        _ => {
+            let trimmed = raw_args.trim();
+            if trimmed.len() <= MAX_TOOL_CALL_DISPLAY_CHARS
+                && trimmed.lines().count() <= MAX_TOOL_CALL_DISPLAY_LINES
+            {
+                trimmed.to_string()
+            } else {
+                truncate_tool_body(trimmed, ToolPreviewKind::Call)
+            }
+        }
+    }
+}
+
+fn format_tool_result(_tool: &str, raw: &str) -> (String, String) {
+    const SENTINEL: &str = "<CINTO_TOOL_OUTPUT_END>";
+    let stripped = raw.replace(SENTINEL, "");
+    let body = stripped.trim_end_matches(|c: char| c.is_whitespace());
+    let line_count = body.lines().count();
+    let char_count = body.chars().count();
+
+    let stats = format!("  {} · {}", format_lines(line_count), humanize_size(char_count));
+
+    if line_count <= MAX_TOOL_RESULT_DISPLAY_LINES && char_count <= MAX_TOOL_RESULT_DISPLAY_CHARS {
+        return (stats, body.to_string());
+    }
+
+    let truncated = truncate_tool_body(body, ToolPreviewKind::Result);
+    (format!("{stats}  · truncated"), truncated)
+}
+
+fn format_lines(count: usize) -> String {
+    if count == 1 {
+        "1 line".to_string()
+    } else {
+        format!("{count} lines")
+    }
+}
+
+fn humanize_size(chars: usize) -> String {
+    if chars < 1024 {
+        format!("{chars}B")
+    } else if chars < 1024 * 1024 {
+        format!("{:.1}KB", chars as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", chars as f64 / (1024.0 * 1024.0))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ToolPreviewKind {
     Call,
@@ -193,13 +305,6 @@ enum ToolPreviewKind {
 }
 
 impl ToolPreviewKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Call => "Tool call",
-            Self::Result => "Tool output",
-        }
-    }
-
     fn max_chars(self) -> usize {
         match self {
             Self::Call => MAX_TOOL_CALL_DISPLAY_CHARS,
@@ -245,37 +350,22 @@ fn truncate_tool_body(body: &str, kind: ToolPreviewKind) -> String {
     let tail_len = kind.tail_lines().min(lines.len().saturating_sub(head_len));
     let omitted = lines.len().saturating_sub(head_len + tail_len);
 
-    let mut output = preview_header(kind, line_count, char_count, head_len, tail_len);
-    output.push_str("\n--- first lines ---\n");
+    let mut output = String::new();
     for line in lines.iter().take(head_len) {
         output.push_str(&clip_preview_line(line));
         output.push('\n');
     }
 
-    output.push_str(&format!("--- omitted {omitted} lines ---\n"));
+    output.push_str(&format!("… {omitted} lines hidden …\n"));
 
     if tail_len > 0 {
-        output.push_str("--- last lines ---\n");
         for line in lines.iter().skip(lines.len() - tail_len) {
             output.push_str(&clip_preview_line(line));
             output.push('\n');
         }
     }
 
-    output
-}
-
-fn preview_header(
-    kind: ToolPreviewKind,
-    line_count: usize,
-    char_count: usize,
-    head_len: usize,
-    tail_len: usize,
-) -> String {
-    format!(
-        "**{} truncated for display**\noriginal: {line_count} lines / {char_count} chars\npreview: first {head_len} lines + last {tail_len} lines\nfull content remains in session context\n",
-        kind.label()
-    )
+    output.trim_end().to_string()
 }
 
 fn single_line_tool_preview(body: &str, kind: ToolPreviewKind, char_count: usize) -> String {
@@ -289,8 +379,7 @@ fn single_line_tool_preview(body: &str, kind: ToolPreviewKind, char_count: usize
     let omitted = char_count.saturating_sub(head_chars + tail_chars);
 
     format!(
-        "**{} truncated for display**\noriginal: 1 line / {char_count} chars\npreview: first {head_chars} chars + last {tail_chars} chars\nfull content remains in session context\n\n--- preview ---\n{}\n--- omitted {omitted} chars ---\n{}",
-        kind.label(),
+        "{}\n… {omitted} chars hidden …\n{}",
         clip_preview_line(&head),
         clip_preview_line(&tail)
     )

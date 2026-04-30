@@ -44,6 +44,15 @@ enum View {
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StreamPhase {
+    Idle,
+    WarmingUp,
+    Thinking,
+    CallingTool(String),
+    Responding,
+}
+
 pub struct App {
     session: Option<AgentSession>,
     config: Config,
@@ -65,6 +74,9 @@ pub struct App {
     stream_item_index: Option<usize>,
     busy_since: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
+    stream_phase: StreamPhase,
+    turn_first_token_at: Option<Instant>,
+    turn_token_chars: usize,
     estimated_tokens: usize,
     history_len: usize,
     todo_details: String,
@@ -86,7 +98,7 @@ impl App {
             config_path,
             transcript: vec![TranscriptItem::system(
                 "Ready",
-                "OH! OpenHarness is ready. Type a request, /tools, /todos, /prompt, /settings, /clear, or /quit.",
+                "Cinto is ready. Type a request, /tools, /todos, /prompt, /settings, /clear, or /quit.",
             )],
             input: String::new(),
             path_suggestions: Vec::new(),
@@ -104,6 +116,9 @@ impl App {
             stream_item_index: None,
             busy_since: None,
             last_turn_elapsed: None,
+            stream_phase: StreamPhase::Idle,
+            turn_first_token_at: None,
+            turn_token_chars: 0,
             estimated_tokens,
             history_len,
             todo_details,
@@ -361,6 +376,9 @@ impl App {
         self.status_kind = StatusKind::Working;
         self.busy_since = Some(Instant::now());
         self.last_turn_elapsed = None;
+        self.stream_phase = StreamPhase::WarmingUp;
+        self.turn_first_token_at = None;
+        self.turn_token_chars = 0;
         self.stream_rx = Some(event_rx);
         self.stream_item_index = None;
 
@@ -409,6 +427,9 @@ impl App {
 
         self.last_turn_elapsed = self.busy_since.map(|started| started.elapsed());
         self.busy_since = None;
+        self.stream_phase = StreamPhase::Idle;
+        self.turn_first_token_at = None;
+        self.turn_token_chars = 0;
         self.stream_rx = None;
         self.stream_item_index = None;
         self.follow_tail = true;
@@ -432,6 +453,12 @@ impl App {
             TurnEvent::AssistantDelta(delta) => {
                 let index = self.ensure_stream_item();
                 self.transcript[index].body.push_str(&delta);
+                if self.turn_first_token_at.is_none() {
+                    self.turn_first_token_at = Some(Instant::now());
+                }
+                self.turn_token_chars =
+                    self.turn_token_chars.saturating_add(delta.chars().count());
+                self.stream_phase = derive_stream_phase(&self.transcript[index].body);
                 self.status = "streaming".to_string();
                 self.status_kind = StatusKind::Working;
                 self.follow_tail = true;
@@ -442,6 +469,9 @@ impl App {
                         self.transcript.remove(index);
                     }
                 }
+                self.turn_first_token_at = None;
+                self.turn_token_chars = 0;
+                self.stream_phase = StreamPhase::Thinking;
             }
             TurnEvent::Message(message) => {
                 if message.role == Role::Assistant && message.channel == Some(Channel::Final) {
@@ -733,6 +763,43 @@ fn current_path_prefix(input: &str) -> Option<((usize, usize), String)> {
     }
 
     Some(((start, end), prefix.to_string()))
+}
+
+fn derive_stream_phase(body: &str) -> StreamPhase {
+    const MARKER: &str = "<|channel|>";
+    let Some(idx) = body.rfind(MARKER) else {
+        return if body.is_empty() {
+            StreamPhase::WarmingUp
+        } else {
+            StreamPhase::Thinking
+        };
+    };
+    let after = &body[idx + MARKER.len()..];
+
+    if let Some(rest) = after.strip_prefix("commentary") {
+        if let Some(to_idx) = rest.find(" to=") {
+            let after_to = &rest[to_idx + " to=".len()..];
+            let end = after_to
+                .find(|c: char| c.is_whitespace() || c == '<')
+                .unwrap_or(after_to.len());
+            let recipient = after_to[..end].trim();
+            let name = recipient
+                .strip_prefix("functions.")
+                .unwrap_or(recipient)
+                .to_string();
+            if name.is_empty() {
+                StreamPhase::Thinking
+            } else {
+                StreamPhase::CallingTool(name)
+            }
+        } else {
+            StreamPhase::Thinking
+        }
+    } else if after.starts_with("final") {
+        StreamPhase::Responding
+    } else {
+        StreamPhase::Thinking
+    }
 }
 
 fn is_path_like(token: &str) -> bool {

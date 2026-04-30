@@ -17,7 +17,7 @@ use crate::{
 
 const MAX_TOOL_CONTEXT_CHARS: usize = 8_000;
 const MAX_TOOL_CONTEXT_LINES: usize = 220;
-const TOOL_OUTPUT_END: &str = "<OPENHARNESS_TOOL_OUTPUT_END>";
+const TOOL_OUTPUT_END: &str = "<CINTO_TOOL_OUTPUT_END>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -397,7 +397,7 @@ fn compact_tool_context(recipient: &str, output: &str) -> String {
     let omitted = lines.len().saturating_sub(head_len + tail_len);
 
     let mut compact = format!(
-        "OpenHarness compacted a large tool result before adding it to model context.\nrecipient: {}\noriginal: {} lines / {} chars\nincluded: first {} lines + last {} lines\nIf you need details from the omitted middle, use search or request a narrower file/range.\n\n--- first lines ---\n",
+        "Cinto compacted a large tool result before adding it to model context.\nrecipient: {}\noriginal: {} lines / {} chars\nincluded: first {} lines + last {} lines\nIf you need details from the omitted middle, use search or request a narrower file/range.\n\n--- first lines ---\n",
         clean_recipient(recipient),
         line_count,
         char_count,

@@ -48,7 +48,7 @@ pub fn create_checkpoint(workspace: &Path, label: Option<&str>) -> Result<String
     let diff = git_output(workspace, &["diff", "--binary", "HEAD", "--"])?;
 
     let metadata = format!(
-        "# OpenHarness checkpoint\n# Created: {}\n# Workspace: {}\n# Label: {}\n\n## Status\n{}\n\n## Diff Stat\n{}\n\n## Diff\n{}",
+        "# Cinto checkpoint\n# Created: {}\n# Workspace: {}\n# Label: {}\n\n## Status\n{}\n\n## Diff Stat\n{}\n\n## Diff\n{}",
         Local::now().to_rfc3339(),
         workspace.display(),
         label.unwrap_or(""),
@@ -163,7 +163,7 @@ fn git_output(workspace: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn checkpoint_dir(workspace: &Path) -> PathBuf {
-    workspace.join(".openharness").join("checkpoints")
+    workspace.join(".cinto").join("checkpoints")
 }
 
 fn collect_path_suggestions(
@@ -228,7 +228,7 @@ fn collect_path_suggestions(
 }
 
 fn should_skip_entry(name: &str) -> bool {
-    matches!(name, ".git" | ".openharness" | "target")
+    matches!(name, ".git" | ".cinto" | "target")
 }
 
 fn sanitize_label(label: &str) -> String {

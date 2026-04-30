@@ -1,6 +1,6 @@
-# OpenHarness Architecture
+# Cinto Architecture
 
-OpenHarness is meant to become a local coding harness for `gpt-oss-20b` and
+Cinto is meant to become a local coding harness for `gpt-oss-20b` and
 `gpt-oss-120b`, with Harmony as the model-facing protocol and a terminal UI as
 the operator surface.
 
@@ -26,7 +26,7 @@ renderer/parser for servers that accept pre-tokenized prompts.
 - `model`: calls an OpenAI-compatible local completion endpoint with optional
   bearer auth from an environment variable
 - `session`: owns conversation history, tool execution, and tool-loop depth
-- `ui`: provides the ratatui/crossterm terminal interface, including the `OH!`
+- `ui`: provides the ratatui/crossterm terminal interface, including the `[◉]`
   chat and settings views
 
 ## Tool Policy
@@ -59,7 +59,7 @@ and visible stdout/stderr in the TUI.
 The first safety features are local TUI commands, not model tools:
 
 - `/diff` shows git status, diff stat, and a bounded tracked diff.
-- `/checkpoint [label]` writes a patch snapshot under `.openharness/checkpoints`.
+- `/checkpoint [label]` writes a patch snapshot under `.cinto/checkpoints`.
 - `/checkpoints` lists saved snapshots.
 
 Checkpoints are intentionally non-destructive. They do not commit, stash, reset,
@@ -74,12 +74,12 @@ carries the full tool content for the current model loop.
 Very large tool results are compacted before being appended to model-facing
 history. The compacted message includes original size metadata, first/last
 sections, guidance to use search or narrower reads, and an explicit
-`<OPENHARNESS_TOOL_OUTPUT_END>` marker. This keeps local models from spending a
+`<CINTO_TOOL_OUTPUT_END>` marker. This keeps local models from spending a
 turn continuing or reprocessing a huge tool blob.
 
 Workspace path suggestions are local UI affordances. They scan the configured
 workspace for path-like input tokens, skip noisy directories such as `.git`,
-`.openharness`, and `target`, and accept the first visible suggestion with
+`.cinto`, and `target`, and accept the first visible suggestion with
 `Right`.
 
 ## Model Backends
@@ -91,7 +91,7 @@ default endpoint is a base URL:
 http://127.0.0.1:1234
 ```
 
-OpenHarness expands base URLs to:
+Cinto expands base URLs to:
 
 ```text
 POST /v1/chat/completions
@@ -146,5 +146,5 @@ normalization instead of branching throughout `session` and `model`.
 2. Add editable file patches with preview, approval, and rollback metadata.
 3. Add a planning panel that separates requested work, todo state, tool calls, and final
    answers.
-4. Persist sessions under `.openharness/sessions`.
+4. Persist sessions under `.cinto/sessions`.
 5. Add protocol adapters for non-Harmony models once the Harmony path is stable.

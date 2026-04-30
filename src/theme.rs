@@ -40,22 +40,26 @@ impl Theme {
         use ratatui::text::{Line, Span};
 
         vec![
+            Line::from(vec![Span::styled(
+                "█▀▀ █ █▄ █ ▀█▀ █▀█",
+                self.brand(),
+            )]),
+            Line::from(vec![Span::styled(
+                "█▄▄ █ █ ▀█  █  █▄█",
+                self.brand_subtle(),
+            )]),
             Line::from(vec![
-                Span::styled(" ███ ", self.brand()),
-                Span::styled("█ █ ", self.brand_subtle()),
-                Span::styled("█ ", self.brand()),
-            ]),
-            Line::from(vec![
-                Span::styled(" █ █ ", self.brand()),
-                Span::styled("███ ", self.brand_subtle()),
-                Span::styled("█ ", self.brand()),
-            ]),
-            Line::from(vec![
-                Span::styled(" ███ ", self.brand()),
-                Span::styled("█ █ ", self.brand_subtle()),
-                Span::styled("▄ ", self.brand()),
+                Span::styled("╾══════", self.dim_style()),
+                Span::styled("[◉]", self.buckle()),
+                Span::styled("══════╼", self.dim_style()),
             ]),
         ]
+    }
+
+    pub fn buckle(&self) -> Style {
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn brand(&self) -> Style {
@@ -115,9 +119,12 @@ pub enum StatusKind {
     Error,
 }
 
-pub const BRAND_NAME: &str = "OH!";
+pub const BRAND_NAME: &str = "[◉]";
+pub const BRAND_WORDMARK: &str = "Cinto";
 
-pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub const WAVE_FRAMES: &[&str] = &[
+    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂",
+];
 
 pub const THINKING_FLAVOR: &[&str] = &[
     "Reading the room",
@@ -130,10 +137,38 @@ pub const THINKING_FLAVOR: &[&str] = &[
     "Keeping the harness warm",
 ];
 
-pub fn spinner_frame(tick: u64) -> &'static str {
-    SPINNER_FRAMES[(tick as usize) % SPINNER_FRAMES.len()]
+pub fn wave_frame(tick: u64) -> &'static str {
+    WAVE_FRAMES[(tick as usize) % WAVE_FRAMES.len()]
 }
 
 pub fn thinking_flavor(tick: u64) -> &'static str {
     THINKING_FLAVOR[((tick / 8) as usize) % THINKING_FLAVOR.len()]
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PhaseGlyph {
+    Thinking,
+    Tool,
+    Responding,
+}
+
+impl PhaseGlyph {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PhaseGlyph::Thinking => "◦",
+            PhaseGlyph::Tool => "⚙",
+            PhaseGlyph::Responding => "▸",
+        }
+    }
+}
+
+impl Theme {
+    pub fn phase_style(&self, glyph: PhaseGlyph) -> Style {
+        let color = match glyph {
+            PhaseGlyph::Thinking => self.accent_soft,
+            PhaseGlyph::Tool => self.tool,
+            PhaseGlyph::Responding => self.accent,
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    }
 }

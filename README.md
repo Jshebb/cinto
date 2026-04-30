@@ -1,6 +1,6 @@
-# OpenHarness
+# Cinto
 
-OpenHarness is a Rust terminal UI for experimenting with a Harmony-based local
+Cinto is a Rust terminal UI for experimenting with a Harmony-based local
 coding agent loop against open-weight `gpt-oss-20b` and `gpt-oss-120b` model
 servers.
 
@@ -8,13 +8,13 @@ The first milestone is intentionally small:
 
 - render Harmony prompts with `system`, `developer`, user, assistant, and tool messages
 - call an OpenAI-compatible local `/v1/completions` endpoint
-- run in an `OH!` terminal UI with chat and settings views
+- run in an `[◉]` terminal UI with chat and settings views
 - expose read-only workspace tools through Harmony commentary tool calls
 - keep an in-memory task todo list that the agent can create, display, and update
 
 ## Why Harmony
 
-`gpt-oss` models expect the Harmony conversation format. OpenHarness keeps that
+`gpt-oss` models expect the Harmony conversation format. Cinto keeps that
 format explicit so local inference servers can be swapped while the harness keeps
 control over agent state, tools, and workspace policy.
 
@@ -32,7 +32,7 @@ The default endpoint is LM Studio's local server base URL:
 http://127.0.0.1:1234
 ```
 
-OpenHarness normalizes that to `/v1/chat/completions`. You can still provide an
+Cinto normalizes that to `/v1/chat/completions`. You can still provide an
 explicit `/v1/completions` endpoint for servers that accept raw text completions.
 
 Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
@@ -40,12 +40,12 @@ Use `/tools` to inspect the detailed tool catalog exposed to the agent, and
 `/todos` to display the current task todo list.
 Use `/diff` before and after risky work to inspect the workspace diff. Use
 `/checkpoint [label]` to save a non-destructive patch snapshot under
-`.openharness/checkpoints`, and `/checkpoints` to list saved snapshots.
+`.cinto/checkpoints`, and `/checkpoints` to list saved snapshots.
 Use `/settings`, `Tab`, or `F2` to open API settings.
 
 ## Configuration
 
-Create `~/.config/openharness/config.toml` or pass `--config path/to/config.toml`.
+Create `~/.config/cinto/config.toml` or pass `--config path/to/config.toml`.
 
 ```toml
 [model]
@@ -64,16 +64,16 @@ context_window = 8192
 workspace = "/home/you/project"
 allow_shell = false
 max_tool_turns = 16
-system_prompt = "You are OpenHarness, a local coding agent running in a terminal UI."
+system_prompt = "You are Cinto, a local coding agent running in a terminal UI."
 developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits."
 ```
 
 Leave `api_key_env` blank or remove it for local servers that do not need bearer
-auth. When it is set, OpenHarness reads the secret from that environment
+auth. When it is set, Cinto reads the secret from that environment
 variable and sends it as a bearer token. The TUI saves the variable name, not the
 secret.
 
-`thinking_effort` can be `none`, `low`, `medium`, or `high`. OpenHarness sends
+`thinking_effort` can be `none`, `low`, `medium`, or `high`. Cinto sends
 it as `reasoning_effort` to compatible OpenAI-style servers. Set `stream = true`
 to render model output continuously as chunks arrive.
 
@@ -90,9 +90,9 @@ server and increase context/token settings on the server side.
 - `s`: save settings to TOML
 - `Ctrl-C`: quit
 
-OpenHarness suggests workspace paths while you type path-like tokens such as
+Cinto suggests workspace paths while you type path-like tokens such as
 `src/`, `Cargo`, or `docs/read`. Suggestions are read from the configured
-workspace and skip `.git`, `.openharness`, and `target`.
+workspace and skip `.git`, `.cinto`, and `target`.
 
 ## Safety Commands
 
@@ -136,7 +136,7 @@ adapters and non-Harmony prompt formats for model families such as Qwen or Gemma
 should wait until the agent loop, tool visibility, and task tracking are solid.
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
-ask for a narrower step. OpenHarness returns a normal assistant message when the
+ask for a narrower step. Cinto returns a normal assistant message when the
 budget is exhausted instead of aborting the turn.
 
 See [docs/architecture.md](docs/architecture.md) for the design notes and next

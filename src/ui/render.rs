@@ -1,18 +1,25 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph, Wrap},
 };
 
+use std::time::Duration;
+
 use super::{
-    App, View,
+    App, StreamPhase, View,
     commands::slash_command_tips,
-    formatting::{compact, format_duration, token_ratio, token_status_kind},
+    formatting::{
+        compact, format_duration, format_elapsed_short, token_ratio, token_status_kind,
+        tokens_per_second,
+    },
     settings::SETTINGS,
-    transcript::{markdown_bold_spans, wrap_text},
+    transcript::{markdown_bold_spans, sanitize_stream_body, wrap_text},
 };
-use crate::theme::{BRAND_NAME, StatusKind, Theme, spinner_frame, thinking_flavor};
+use crate::theme::{
+    BRAND_NAME, BRAND_WORDMARK, PhaseGlyph, StatusKind, Theme, thinking_flavor, wave_frame,
+};
 
 impl App {
     pub(super) fn render_header(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
@@ -27,13 +34,14 @@ impl App {
 
         let [meta_area, logo_area] = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(30), Constraint::Length(16)])
+            .constraints([Constraint::Min(30), Constraint::Length(22)])
             .areas(area);
 
         let meta = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled(BRAND_NAME, self.theme.brand()),
-                Span::raw(" OpenHarness"),
+                Span::styled(BRAND_NAME, self.theme.buckle()),
+                Span::raw(" "),
+                Span::styled(BRAND_WORDMARK, self.theme.brand()),
                 Span::styled(format!("  {view}"), self.theme.dim_style()),
             ]),
             Line::from(vec![
@@ -220,17 +228,7 @@ impl App {
         };
 
         if working {
-            content.insert(
-                0,
-                Line::from(vec![
-                    Span::styled(
-                        spinner_frame(self.spinner_tick),
-                        self.theme.status_style(StatusKind::Working),
-                    ),
-                    Span::styled(" Thinking ", self.theme.status_style(StatusKind::Working)),
-                    Span::styled(thinking_flavor(self.spinner_tick), self.theme.dim_style()),
-                ]),
-            );
+            content.insert(0, self.phase_indicator_line());
         }
 
         if area.height == 1 && self.view == View::Chat && !working {
@@ -268,51 +266,207 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .areas(area);
+
         let ratio = token_ratio(self.estimated_tokens, self.config.model.context_window);
-        let token_label = format!(
+        let label_text = format!(
             "ctx {} / {}",
             self.estimated_tokens, self.config.model.context_window
         );
-        let gauge = Gauge::default()
-            .gauge_style(self.theme.status_style(token_status_kind(ratio)))
-            .ratio(ratio)
-            .label(token_label);
-        frame.render_widget(gauge, token_area);
+        let label_width = (label_text.chars().count() as u16).saturating_add(2);
+        let [label_area, gauge_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(label_width), Constraint::Min(8)])
+            .areas(token_area);
 
-        let status = Paragraph::new(Line::from(vec![
+        let token_kind = token_status_kind(ratio);
+        let label = Paragraph::new(Line::from(vec![
+            Span::styled("ctx ", self.theme.dim_style()),
+            Span::styled(
+                format!("{}", self.estimated_tokens),
+                self.theme.status_style(token_kind),
+            ),
+            Span::styled(
+                format!(" / {}", self.config.model.context_window),
+                self.theme.dim_style(),
+            ),
+            Span::raw(" "),
+        ]));
+        frame.render_widget(label, label_area);
+
+        let gauge = Gauge::default()
+            .gauge_style(self.theme.status_style(token_kind))
+            .ratio(ratio)
+            .label(format!("{:.0}%", ratio * 100.0));
+        frame.render_widget(gauge, gauge_area);
+
+        let mut status_spans = vec![
             Span::styled("Status ", self.theme.dim_style()),
             Span::styled(
                 self.status.as_str(),
                 self.theme.status_style(self.status_kind),
             ),
-            Span::raw("   "),
-            Span::styled("Keys ", Style::default().fg(self.theme.muted)),
-            Span::raw("Tab/F2 settings  PgUp/PgDn scroll  Ctrl-C quit"),
-        ]))
-        .alignment(Alignment::Left);
+        ];
+
+        if self.is_busy() {
+            if let Some(first) = self.turn_first_token_at {
+                if let Some(tps) = tokens_per_second(self.turn_token_chars, first.elapsed()) {
+                    status_spans.push(Span::raw("   "));
+                    status_spans.push(Span::styled(
+                        format!("{tps:.0} tok/s"),
+                        self.theme.status_style(StatusKind::Working),
+                    ));
+                }
+            }
+        }
+
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled("Keys ", Style::default().fg(self.theme.muted)));
+        status_spans.push(Span::raw("Tab/F2 settings  PgUp/PgDn scroll  Ctrl-C quit"));
+
+        let status = Paragraph::new(Line::from(status_spans)).alignment(Alignment::Left);
         frame.render_widget(status, status_area);
     }
 
+    fn phase_indicator_line(&self) -> Line<'static> {
+        let elapsed = self
+            .busy_since
+            .map(|started| started.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+        let waiting_long = elapsed >= Duration::from_secs(10);
+        let no_tokens_yet = self.turn_token_chars == 0;
+
+        let (glyph, label, glyph_style) = if no_tokens_yet
+            || matches!(self.stream_phase, StreamPhase::WarmingUp)
+        {
+            let text = if waiting_long {
+                "still thinking… (this is normal for local models)".to_string()
+            } else if self.turn_first_token_at.is_none() {
+                "warming up".to_string()
+            } else {
+                "thinking".to_string()
+            };
+            (
+                PhaseGlyph::Thinking,
+                text,
+                self.theme.phase_style(PhaseGlyph::Thinking),
+            )
+        } else {
+            match &self.stream_phase {
+                StreamPhase::Thinking => (
+                    PhaseGlyph::Thinking,
+                    "thinking".to_string(),
+                    self.theme.phase_style(PhaseGlyph::Thinking),
+                ),
+                StreamPhase::CallingTool(name) => {
+                    let action = match name.as_str() {
+                        "read_file" => "reading file",
+                        "list_files" => "listing files",
+                        "search" => "searching",
+                        "todo_write" => "writing todos",
+                        "todo_read" => "reading todos",
+                        _ => "calling tool",
+                    };
+                    (
+                        PhaseGlyph::Tool,
+                        format!("{action} · {name}"),
+                        self.theme.phase_style(PhaseGlyph::Tool),
+                    )
+                }
+                StreamPhase::Responding => (
+                    PhaseGlyph::Responding,
+                    "responding".to_string(),
+                    self.theme.phase_style(PhaseGlyph::Responding),
+                ),
+                StreamPhase::Idle | StreamPhase::WarmingUp => (
+                    PhaseGlyph::Thinking,
+                    "thinking".to_string(),
+                    self.theme.phase_style(PhaseGlyph::Thinking),
+                ),
+            }
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("{} ", glyph.as_str()), glyph_style),
+            Span::styled(
+                wave_frame(self.spinner_tick),
+                self.theme.status_style(StatusKind::Working),
+            ),
+            Span::raw(" "),
+            Span::styled(label, self.theme.status_style(StatusKind::Working)),
+            Span::styled(
+                format!("  {}", format_elapsed_short(elapsed)),
+                self.theme.dim_style(),
+            ),
+        ];
+
+        if let Some(first) = self.turn_first_token_at {
+            if let Some(tps) = tokens_per_second(self.turn_token_chars, first.elapsed()) {
+                spans.push(Span::styled(
+                    format!("  {tps:.0} tok/s"),
+                    self.theme.dim_style(),
+                ));
+            }
+        } else {
+            spans.push(Span::styled(
+                format!("  {}", thinking_flavor(self.spinner_tick)),
+                self.theme.dim_style(),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        use super::transcript::TranscriptRole;
+
         let mut lines = Vec::new();
-        for item in &self.transcript {
+        for (index, item) in self.transcript.iter().enumerate() {
             let role = item.role.label();
             let style = item.role.style(&self.theme);
+            let is_tool = item.role == TranscriptRole::Tool;
+            let rail = if is_tool { "│ " } else { "" };
+            let rail_style = self.theme.dim_style();
+            let inner_width = width.saturating_sub(rail.chars().count() as u16);
+
             lines.push(Line::from(vec![
                 Span::styled(role, style),
                 Span::styled(format!(" {}", item.title), self.theme.dim_style()),
             ]));
 
-            for line in item.body.lines() {
+            let is_streaming = self.stream_item_index == Some(index);
+            let is_diff = item.role == TranscriptRole::System && item.title == "Workspace Diff";
+            let body_owned;
+            let body_ref: &str = if is_streaming {
+                body_owned = sanitize_stream_body(&item.body);
+                &body_owned
+            } else {
+                &item.body
+            };
+
+            for line in body_ref.lines() {
                 if line.is_empty() {
-                    lines.push(Line::raw(""));
+                    if is_tool {
+                        lines.push(Line::from(vec![Span::styled(rail, rail_style)]));
+                    } else {
+                        lines.push(Line::raw(""));
+                    }
+                } else if is_diff {
+                    let style = diff_line_style(line, &self.theme);
+                    for wrapped in wrap_text(line, inner_width) {
+                        lines.push(Line::from(Span::styled(wrapped, style)));
+                    }
                 } else {
-                    lines.extend(wrap_text(line, width).into_iter().map(|line| {
-                        Line::from(markdown_bold_spans(
-                            &line,
+                    for wrapped in wrap_text(line, inner_width) {
+                        let mut spans = Vec::new();
+                        if is_tool {
+                            spans.push(Span::styled(rail, rail_style));
+                        }
+                        spans.extend(markdown_bold_spans(
+                            &wrapped,
                             Style::default().fg(self.theme.fg),
-                        ))
-                    }));
+                        ));
+                        lines.push(Line::from(spans));
+                    }
                 }
             }
             lines.push(Line::raw(""));
@@ -341,7 +495,11 @@ impl App {
         let state = if self.is_busy() { "running" } else { "ready" };
 
         let mut lines = vec![
-            Line::styled("OH! OpenHarness", self.theme.brand()),
+            Line::from(vec![
+                Span::styled(BRAND_NAME, self.theme.buckle()),
+                Span::raw(" "),
+                Span::styled(BRAND_WORDMARK, self.theme.brand()),
+            ]),
             Line::raw(""),
             Line::styled("Session", self.theme.brand()),
             Line::raw(format!("state: {state}  elapsed: {elapsed}")),
@@ -436,6 +594,26 @@ impl App {
             x: area.x.saturating_add(x_offset).saturating_add(cursor_x),
             y: area.y.saturating_add(y_offset),
         });
+    }
+}
+
+fn diff_line_style(line: &str, theme: &Theme) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") {
+        Style::default()
+            .fg(theme.accent_soft)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("diff ") || line.starts_with("index ") {
+        Style::default().fg(theme.dim)
+    } else if line.starts_with('+') {
+        Style::default().fg(theme.success)
+    } else if line.starts_with('-') {
+        Style::default().fg(theme.error)
+    } else {
+        Style::default().fg(theme.fg)
     }
 }
 
