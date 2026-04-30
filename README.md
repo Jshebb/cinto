@@ -41,18 +41,18 @@ Use this today from a source checkout or a public GitHub repo:
 cargo install --git https://github.com/joaoh/cinto
 ```
 
-### Shell installer
+### Shell installer (Linux / macOS)
 
 After the first `v*` release is tagged, GitHub Releases will publish
-precompiled Linux, macOS, and Windows binaries:
+precompiled binaries:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
 ```
 
-The installer detects your platform, downloads
-`cinto-<target>.tar.gz` from the latest GitHub Release, verifies the SHA-256
-checksum, and installs `cinto` into `${XDG_BIN_HOME:-$HOME/.local/bin}`.
+The installer detects your platform, downloads `cinto-<target>.tar.gz` from the
+latest GitHub Release, verifies the SHA-256 checksum, installs `cinto` into
+`${XDG_BIN_HOME:-$HOME/.local/bin}`, and adds it to your shell profile.
 
 Override the install directory:
 
@@ -60,6 +60,14 @@ Override the install directory:
 curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh \
   | CINTO_INSTALL_DIR="$HOME/bin" sh
 ```
+
+### PowerShell installer (Windows)
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/joaoh/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
+```
+
+This downloads and extracts the latest Windows release to `~\.local\bin` and automatically adds it to your User `PATH`.
 
 ### npm wrapper
 

@@ -142,10 +142,42 @@ mkdir -p "$data_dir"
 
 say "Installed cinto to $bin_dir/$installed"
 say "Uninstall with: cinto uninstall"
+
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)
-    say "Warning: $bin_dir is not on PATH."
-    say "Add it to your shell profile, then run: cinto"
+    profile=""
+    case "$(basename "${SHELL:-/bin/sh}")" in
+      zsh)
+        profile="$HOME/.zshrc"
+        ;;
+      bash)
+        profile="$HOME/.bashrc"
+        ;;
+      *)
+        if [ -f "$HOME/.zshrc" ]; then
+          profile="$HOME/.zshrc"
+        elif [ -f "$HOME/.bashrc" ]; then
+          profile="$HOME/.bashrc"
+        elif [ -f "$HOME/.profile" ]; then
+          profile="$HOME/.profile"
+        fi
+        ;;
+    esac
+
+    if [ -n "$profile" ]; then
+      touch "$profile" 2>/dev/null || true
+      if grep -q "export PATH=.*$bin_dir" "$profile" 2>/dev/null; then
+        say "Warning: $bin_dir is not on current PATH but was found in $profile."
+        say "Restart your terminal or run: source $profile"
+      else
+        printf '\n# cinto path\nexport PATH="%s:$PATH"\n' "$bin_dir" >> "$profile"
+        say "Added $bin_dir to PATH in $profile"
+        say "Restart your terminal or run: source $profile"
+      fi
+    else
+      say "Warning: $bin_dir is not on PATH."
+      say "Add it to your shell profile, then run: cinto"
+    fi
     ;;
 esac

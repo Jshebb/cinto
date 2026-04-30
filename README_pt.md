@@ -37,18 +37,18 @@ Funciona hoje a partir do repositório público:
 cargo install --git https://github.com/joaoh/cinto
 ```
 
-### Instalador shell
+### Instalador shell (Linux / macOS)
 
-Depois da primeira tag `v*`, o workflow de release publica binários para Linux,
-macOS e Windows:
+Depois da primeira tag `v*`, o workflow de release publica os binários
+pré-compilados:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
 ```
 
 O instalador detecta a plataforma, baixa `cinto-<target>.tar.gz` do GitHub
-Releases, verifica o checksum SHA-256 e instala em
-`${XDG_BIN_HOME:-$HOME/.local/bin}`.
+Releases, verifica o checksum SHA-256, instala o binário em
+`${XDG_BIN_HOME:-$HOME/.local/bin}` e adiciona automaticamente ao seu profile.
 
 Para escolher outro destino:
 
@@ -56,6 +56,15 @@ Para escolher outro destino:
 curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh \
   | CINTO_INSTALL_DIR="$HOME/bin" sh
 ```
+
+### Instalador PowerShell (Windows)
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/joaoh/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
+```
+
+Ele baixa e extrai a última release para `~\.local\bin` e adiciona o diretório
+automaticamente no seu `PATH` de usuário.
 
 ### npm
 
