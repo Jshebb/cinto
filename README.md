@@ -1,6 +1,6 @@
 # Cinto
 
-[![CI](https://github.com/joaoh/cinto/actions/workflows/ci.yml/badge.svg)](https://github.com/joaoh/cinto/actions/workflows/ci.yml)
+[![CI](https://github.com/Jshebb/cinto/actions/workflows/ci.yml/badge.svg)](https://github.com/Jshebb/cinto/actions/workflows/ci.yml)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
 **Cinto is a local terminal coding-agent harness for OpenAI-compatible model
@@ -38,7 +38,7 @@ Most coding agents hide the harness. Cinto keeps it visible.
 Use this today from a source checkout or a public GitHub repo:
 
 ```sh
-cargo install --git https://github.com/joaoh/cinto
+cargo install --git https://github.com/Jshebb/cinto
 ```
 
 ### Shell installer (Linux / macOS)
@@ -47,7 +47,7 @@ After the first `v*` release is tagged, GitHub Releases will publish
 precompiled binaries:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Jshebb/cinto/main/install.sh | sh
 ```
 
 The installer detects your platform, downloads `cinto-<target>.tar.gz` from the
@@ -57,14 +57,14 @@ latest GitHub Release, verifies the SHA-256 checksum, installs `cinto` into
 Override the install directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/Jshebb/cinto/main/install.sh \
   | CINTO_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ### PowerShell installer (Windows)
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/joaoh/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/Jshebb/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
 ```
 
 This downloads and extracts the latest Windows release to `~\.local\bin` and automatically adds it to your User `PATH`.

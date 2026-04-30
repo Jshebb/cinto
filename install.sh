@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo="${CINTO_INSTALL_REPO:-joaoh/cinto}"
+repo="${CINTO_INSTALL_REPO:-Jshebb/cinto}"
 version="${CINTO_INSTALL_VERSION:-latest}"
 bin_dir="${CINTO_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/cinto"

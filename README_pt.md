@@ -34,7 +34,7 @@ A maioria dos agentes esconde o harness. O Cinto deixa a engrenagem visível.
 Funciona hoje a partir do repositório público:
 
 ```sh
-cargo install --git https://github.com/joaoh/cinto
+cargo install --git https://github.com/Jshebb/cinto
 ```
 
 ### Instalador shell (Linux / macOS)
@@ -43,7 +43,7 @@ Depois da primeira tag `v*`, o workflow de release publica os binários
 pré-compilados:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Jshebb/cinto/main/install.sh | sh
 ```
 
 O instalador detecta a plataforma, baixa `cinto-<target>.tar.gz` do GitHub
@@ -53,14 +53,14 @@ Releases, verifica o checksum SHA-256, instala o binário em
 Para escolher outro destino:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/Jshebb/cinto/main/install.sh \
   | CINTO_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ### Instalador PowerShell (Windows)
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/joaoh/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/Jshebb/cinto/main/install.ps1 -UseBasicParsing | Invoke-Expression
 ```
 
 Ele baixa e extrai a última release para `~\.local\bin` e adiciona o diretório

@@ -2,7 +2,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$repo = "joaoh/cinto"
+$repo = "Jshebb/cinto"
 $version = "latest"
 $target = "x86_64-pc-windows-msvc"
 
