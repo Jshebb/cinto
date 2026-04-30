@@ -44,6 +44,8 @@ pub struct HarnessConfig {
     pub context_compression_threshold: u32,
     #[serde(default = "default_context_compression_keep_recent")]
     pub context_compression_keep_recent: u32,
+    #[serde(default = "default_load_workspace_instructions")]
+    pub load_workspace_instructions: bool,
     pub system_prompt: String,
     pub developer_prompt: String,
 }
@@ -74,6 +76,7 @@ impl Default for Config {
                 auto_context_compression: default_auto_context_compression(),
                 context_compression_threshold: default_context_compression_threshold(),
                 context_compression_keep_recent: default_context_compression_keep_recent(),
+                load_workspace_instructions: default_load_workspace_instructions(),
                 system_prompt: "You are Cinto, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
                 developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <CINTO_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details. Treat <CINTO_CONTEXT_COMPACTED> as a concise note about earlier conversation history; rely on recent messages for exact details.".to_string(),
             },
@@ -140,6 +143,10 @@ fn default_context_compression_threshold() -> u32 {
 
 fn default_context_compression_keep_recent() -> u32 {
     18
+}
+
+fn default_load_workspace_instructions() -> bool {
+    true
 }
 
 fn default_require_edit_approval() -> bool {

@@ -179,6 +179,11 @@ impl App {
             self.finish_completed_turn().await?;
 
             terminal.draw(|frame| {
+                if self.view == View::Setup {
+                    self.render_setup(frame.area(), frame);
+                    return;
+                }
+
                 let header_height = self.header_height();
                 let input_height = self.input_height();
                 let areas = app_areas(frame.area(), header_height, input_height, 1);
@@ -187,7 +192,7 @@ impl App {
                 match self.view {
                     View::Chat => self.render_chat(areas.body, frame),
                     View::Settings => self.render_settings(areas.body, frame),
-                    View::Setup => self.render_setup(areas.body, frame),
+                    View::Setup => {}
                 }
                 self.render_input(areas.input, frame);
                 self.render_footer(areas.footer, frame);
@@ -542,10 +547,10 @@ impl App {
                 self.follow_tail = true;
             }
             TurnEvent::DiscardAssistantDraft => {
-                if let Some(index) = self.stream_item_index.take() {
-                    if index < self.transcript.len() {
-                        self.transcript.remove(index);
-                    }
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
                 }
                 self.turn_first_token_at = None;
                 self.turn_token_chars = 0;
@@ -585,15 +590,31 @@ impl App {
                 self.status_kind = StatusKind::Ok;
                 self.follow_tail = true;
             }
+            TurnEvent::EmptyModelResponse { format, model } => {
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
+                }
+                self.transcript.push(TranscriptItem::system(
+                    "Empty Model Response",
+                    format!(
+                        "The model server returned no assistant text and no tool call after the last request.\nmodel: {model}\nformat: {format}\n\nThis usually means the local model stopped early, emitted an unsupported response shape, or needs a more direct follow-up. Try asking again, switching `model.format`, or checking the server logs."
+                    ),
+                ));
+                self.status = "empty model response".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
             TurnEvent::Message(message) => {
-                if message.role == Role::Assistant && message.channel == Some(Channel::Final) {
-                    if let Some(index) = self.stream_item_index.take() {
-                        if index < self.transcript.len() {
-                            self.transcript[index] = TranscriptItem::from_message(&message);
-                            self.follow_tail = true;
-                            return;
-                        }
-                    }
+                if message.role == Role::Assistant
+                    && message.channel == Some(Channel::Final)
+                    && let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript[index] = TranscriptItem::from_message(&message);
+                    self.follow_tail = true;
+                    return;
                 }
 
                 self.transcript.push(TranscriptItem::from_message(&message));
@@ -603,10 +624,10 @@ impl App {
     }
 
     fn ensure_stream_item(&mut self) -> usize {
-        if let Some(index) = self.stream_item_index {
-            if index < self.transcript.len() {
-                return index;
-            }
+        if let Some(index) = self.stream_item_index
+            && index < self.transcript.len()
+        {
+            return index;
         }
 
         self.transcript.push(TranscriptItem::assistant_stream());
@@ -919,6 +940,7 @@ impl App {
                 | SettingField::EditApproval
                 | SettingField::Stream
                 | SettingField::AutoContextCompression
+                | SettingField::WorkspaceInstructions
                 | SettingField::ThinkingEffort
                 | SettingField::Format
         ) {
@@ -950,6 +972,10 @@ impl App {
             }
             SettingField::AutoContextCompression => {
                 config.harness.auto_context_compression = !config.harness.auto_context_compression;
+            }
+            SettingField::WorkspaceInstructions => {
+                config.harness.load_workspace_instructions =
+                    !config.harness.load_workspace_instructions;
             }
             SettingField::ThinkingEffort => {
                 config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);

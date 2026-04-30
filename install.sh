@@ -4,6 +4,7 @@ set -eu
 repo="${CINTO_INSTALL_REPO:-joaoh/cinto}"
 version="${CINTO_INSTALL_VERSION:-latest}"
 bin_dir="${CINTO_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/cinto"
 
 say() {
   printf '%s\n' "$1"
@@ -64,6 +65,34 @@ download() {
   fi
 }
 
+verify_archive_shape() {
+  archive="$1"
+  tar -tzf "$archive" | while IFS= read -r entry; do
+    case "$entry" in
+      cinto|cinto.exe) ;;
+      *) fail "release archive contains unexpected path: $entry" ;;
+    esac
+  done
+}
+
+verify_checksum() {
+  archive="$1"
+  checksum_file="$2"
+
+  if [ "${CINTO_INSTALL_SKIP_CHECKSUM:-}" = "1" ]; then
+    say "Skipping checksum verification because CINTO_INSTALL_SKIP_CHECKSUM=1."
+    return
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$checksum_file")")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$(dirname "$archive")" && shasum -a 256 -c "$(basename "$checksum_file")")
+  else
+    fail "missing sha256sum or shasum for checksum verification"
+  fi
+}
+
 target="$(detect_target)"
 asset="cinto-$target.tar.gz"
 
@@ -80,6 +109,9 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 archive="$tmp_dir/$asset"
 say "Downloading cinto for $target..."
 download "$url" "$archive"
+download "$url.sha256" "$archive.sha256"
+verify_checksum "$archive" "$archive.sha256"
+verify_archive_shape "$archive"
 
 mkdir -p "$tmp_dir/extract"
 tar -xzf "$archive" -C "$tmp_dir/extract"
@@ -100,7 +132,16 @@ else
   chmod 755 "$bin_dir/$installed"
 fi
 
+mkdir -p "$data_dir"
+{
+  printf 'binary=%s\n' "$bin_dir/$installed"
+  printf 'repo=%s\n' "$repo"
+  printf 'version=%s\n' "$version"
+  printf 'target=%s\n' "$target"
+} > "$data_dir/install.toml"
+
 say "Installed cinto to $bin_dir/$installed"
+say "Uninstall with: cinto uninstall"
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)

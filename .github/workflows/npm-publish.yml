@@ -45,6 +45,8 @@ jobs:
         run: |
           mkdir -p npm-dist
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'cinto-*.tar.gz' --dir npm-dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'cinto-*.tar.gz.sha256' --dir npm-dist
+          (cd npm-dist && sha256sum -c ./*.sha256)
 
       - name: Prepare platform packages
         if: steps.npm-token.outputs.present == 'true'

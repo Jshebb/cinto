@@ -59,9 +59,9 @@ impl HarmonyPrompt {
         prompt.push_str("\n\nAvailable commentary tools:\n");
         for tool in &self.tools {
             prompt.push_str("- ");
-            prompt.push_str(&tool.name);
+            prompt.push_str(tool.name);
             prompt.push_str(": ");
-            prompt.push_str(&tool.description);
+            prompt.push_str(tool.description);
             prompt.push('\n');
             prompt.push_str("  schema: ");
             prompt.push_str(tool.schema);

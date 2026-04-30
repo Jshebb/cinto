@@ -2,7 +2,7 @@
   "name": "cinto",
   "version": "0.1.0",
   "description": "A local terminal coding-agent harness for OpenAI-compatible model servers",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/joaoh/cinto.git"

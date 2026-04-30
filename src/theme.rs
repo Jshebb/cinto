@@ -47,7 +47,7 @@ impl Theme {
             )]),
             Line::from(vec![
                 Span::styled("╾══════", self.dim_style()),
-                Span::styled("[◉]", self.buckle()),
+                Span::styled("[C]", self.buckle()),
                 Span::styled("══════╼", self.dim_style()),
             ]),
         ]
@@ -82,9 +82,9 @@ impl Theme {
                 self.dim_style(),
             )]),
             Line::from(vec![
-                Span::styled("╾══════════════", self.dim_style()),
-                Span::styled("[◉]", self.buckle()),
-                Span::styled("══════════════╼", self.dim_style()),
+                Span::styled("╾══════════════════", self.dim_style()),
+                Span::styled("[C]", self.buckle()),
+                Span::styled("══════════════════╼", self.dim_style()),
             ]),
         ]
     }
@@ -152,7 +152,7 @@ pub enum StatusKind {
     Error,
 }
 
-pub const BRAND_NAME: &str = "[◉]";
+pub const BRAND_NAME: &str = "[C]";
 pub const BRAND_WORDMARK: &str = "Cinto";
 
 pub const WAVE_FRAMES: &[&str] = &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂"];

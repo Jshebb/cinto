@@ -1,102 +1,225 @@
 # Cinto
 
-Cinto is a Rust terminal UI for experimenting with a Harmony-based local
-coding agent loop against open-weight `gpt-oss-20b` and `gpt-oss-120b` model
-servers.
+[![CI](https://github.com/joaoh/cinto/actions/workflows/ci.yml/badge.svg)](https://github.com/joaoh/cinto/actions/workflows/ci.yml)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
-The first milestone is intentionally small:
+**Cinto is a local terminal coding-agent harness for OpenAI-compatible model
+servers.** It gives local and open-weight models a focused workspace loop:
+read files, search code, propose edits, keep todos, inspect prompts, and stay
+inside explicit safety rails.
 
-- render Harmony prompts with `system`, `developer`, user, assistant, and tool messages
-- call an OpenAI-compatible local `/v1/completions` endpoint
-- run in an `[◉]` terminal UI with chat and settings views
-- expose read-only workspace tools through Harmony commentary tool calls
-- keep an in-memory task todo list that the agent can create, display, and update
+[Português](README_pt.md) · [Architecture notes](docs/architecture.md)
 
-## Why Harmony
+![Cinto TUI](docs/demo.png)
 
-`gpt-oss` models expect the Harmony conversation format. Cinto keeps that
-format explicit so local inference servers can be swapped while the harness keeps
-control over agent state, tools, and workspace policy.
+## Why Cinto
+
+Most coding agents hide the harness. Cinto keeps it visible.
+
+- **Local-first:** works with LM Studio, Ollama, and other OpenAI-compatible
+  servers.
+- **Two tool modes:** Harmony prompt rendering for `gpt-oss` models and native
+  OpenAI `tool_calls` for Qwen, Llama, and similar tool-capable models.
+- **TUI setup:** first-run greeter, model/server presets, settings, chat, and
+  path suggestions.
+- **Workspace tools:** `list_files`, `read_file`, `search`, `write_file`, and
+  `delete_file`.
+- **Safety controls:** edit approvals, `/diff`, `/checkpoint`, protected
+  `.git`/`.cinto` paths, and no shell execution in the current milestone.
+- **Persistent project context:** optional `AGENTS.md` instructions at the
+  workspace root.
+- **Context management:** large tool outputs and older transcript history are
+  compacted before they overwhelm the model context window.
 
 ## Install
 
-The release build ships precompiled binaries for Linux, macOS, and Windows.
+### Source install
+
+Use this today from a source checkout or a public GitHub repo:
+
+```sh
+cargo install --git https://github.com/joaoh/cinto
+```
+
+### Shell installer
+
+After the first `v*` release is tagged, GitHub Releases will publish
+precompiled Linux, macOS, and Windows binaries:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
 ```
 
-The installer detects the current platform, downloads the latest matching
-`cinto-<target>.tar.gz` from GitHub Releases, and installs `cinto` into
-`${XDG_BIN_HOME:-$HOME/.local/bin}`. Override the destination with
-`CINTO_INSTALL_DIR=/path/to/bin`.
+The installer detects your platform, downloads
+`cinto-<target>.tar.gz` from the latest GitHub Release, verifies the SHA-256
+checksum, and installs `cinto` into `${XDG_BIN_HOME:-$HOME/.local/bin}`.
 
-Node users can install the npm wrapper, which depends on the matching optional
-platform package:
+Override the install directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh \
+  | CINTO_INSTALL_DIR="$HOME/bin" sh
+```
+
+### npm wrapper
+
+After the npm packages are published:
 
 ```sh
 npm install -g cinto
 npx cinto
 ```
 
-For source builds or Rust development:
+The npm package is a small launcher that depends on the matching optional
+platform package, such as `@cinto/linux-x64` or `@cinto/darwin-arm64`.
+
+### Uninstall
 
 ```sh
-cargo install --git https://github.com/joaoh/cinto
+cinto uninstall
+cinto uninstall --purge-config
 ```
+
+`--purge-config` also removes `~/.config/cinto`.
 
 ## Quick Start
 
-Start a local server that exposes `/v1/completions`, then run:
+1. Start an OpenAI-compatible local model server.
+2. Run Cinto:
 
 ```sh
 cinto
 ```
 
-From a source checkout, use `cargo run` instead.
+3. In the setup TUI, choose a preset, confirm the endpoint/model/workspace, and
+   save.
+4. Try a focused request:
 
-On first run, Cinto opens a setup TUI with a large `CINTO` greeter. Pick a
-server preset, confirm the endpoint/model/workspace, then save and enter chat.
-You can reopen it later with:
-
-```sh
-cinto setup
-# or inside the TUI
-/setup
+```text
+Summarize this repository and list the files you inspected.
 ```
 
-Use `cinto --skip-setup` to go straight to chat even when no config file exists.
+Useful setup commands:
 
-The default endpoint is LM Studio's local server base URL:
+```sh
+cinto setup          # reopen the first-run setup TUI
+cinto --skip-setup   # go straight to chat
+cinto --print-prompt # inspect the empty rendered prompt
+cinto --config ./config.toml
+```
+
+## Model Setup
+
+The default endpoint is the LM Studio local server base URL:
 
 ```text
 http://127.0.0.1:1234
 ```
 
-Cinto normalizes that to `/v1/chat/completions`. You can still provide an
-explicit `/v1/completions` endpoint for servers that accept raw text completions.
+Cinto normalizes base URLs to `/v1/chat/completions`. You can still pass an
+explicit `/v1/completions` endpoint for text-completion servers.
 
-Use `/prompt` inside the TUI to inspect the exact Harmony prompt being sent.
-Use `/tools` to inspect the detailed tool catalog exposed to the agent, and
-`/todos` to display the current task todo list.
-Use `/diff` before and after risky work to inspect the workspace diff. Use
-`/checkpoint [label]` to save a non-destructive patch snapshot under
-`.cinto/checkpoints`, and `/checkpoints` to list saved snapshots.
-Use `/settings`, `Tab`, or `F2` to open API settings.
+| Server | Example endpoint | Recommended format | Notes |
+| --- | --- | --- | --- |
+| LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Use the model id shown by LM Studio. |
+| LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`. |
+| Ollama | `http://127.0.0.1:11434` | `openai-tools` | Pull a tool-capable model such as `qwen2.5-coder:7b-instruct`. |
+
+Example Ollama flow:
+
+```sh
+ollama pull qwen2.5-coder:7b-instruct
+cinto setup
+```
+
+Then set:
+
+```toml
+[model]
+endpoint = "http://127.0.0.1:11434"
+model = "qwen2.5-coder:7b-instruct"
+format = "openai-tools"
+thinking_effort = "none"
+```
+
+## TUI Workflow
+
+Inside the TUI:
+
+- Type a request and press `Enter`.
+- Use `/tools` to inspect the tool catalog exposed to the model.
+- Use `/prompt` to inspect the exact prompt/messages being sent.
+- Use `/settings`, `Tab`, or `F2` to edit model and harness settings.
+- Use `/diff` before and after risky work.
+- Use `/checkpoint [label]` to save a patch snapshot under
+  `.cinto/checkpoints`.
+- Use `/git`, `/stage`, `/unstage`, and `/commit` for explicit git actions.
+
+Keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `F2` | Switch between Chat and Settings |
+| `Enter` | Send message or edit/apply a setting |
+| `Right` | Accept the first workspace path suggestion |
+| `Up` / `Down` | Move through settings |
+| `Space` | Toggle boolean settings |
+| `s` | Save settings to TOML |
+| `Ctrl-C` | Quit |
+
+## Workspace Instructions
+
+Cinto reads `AGENTS.md` from the configured workspace root and injects it into
+the model-facing developer instructions. Use it for:
+
+- project context
+- coding conventions
+- common commands
+- anti-patterns to avoid
+- release or testing expectations
+
+The file is optional and bounded so it cannot dominate the prompt. Reopen
+`/prompt` to inspect the exact instructions being sent.
+
+For untrusted repositories, disable it:
+
+```toml
+[harness]
+load_workspace_instructions = false
+```
+
+Or toggle `workspace instructions` off in Settings.
+
+## Safety Model
+
+Cinto is a local agent harness, not a sandbox.
+
+- Read tools can expose workspace contents to the configured model endpoint.
+- File writes and deletes require TUI approval by default.
+- Workspace paths cannot escape the configured root.
+- `.git` and `.cinto` internals are protected from model tool access.
+- Shell execution is intentionally not exposed in the current milestone.
+- Release archives are checked with SHA-256 by the installer, but they are not
+  code-signed or notarized yet.
+
+Avoid pointing Cinto at repositories that contain `.env` files, private keys, or
+production credentials unless you trust the model server and understand what the
+agent can read.
 
 ## Configuration
 
-Create `~/.config/cinto/config.toml` or pass `--config path/to/config.toml`.
+Cinto stores config at `~/.config/cinto/config.toml` unless `--config` is
+provided.
 
 ```toml
 [model]
 endpoint = "http://127.0.0.1:1234"
 model = "openai/gpt-oss-20b"
-format = "harmony"            # or "openai-tools" for Qwen / Llama / etc.
-api_key_env = "OPENAI_API_KEY"
+format = "harmony"            # harmony or openai-tools
+api_key_env = ""
 max_tokens = 4096
 temperature = 0.2
-thinking_effort = "medium"
+thinking_effort = "medium"    # none, low, medium, high
 stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600
@@ -110,147 +233,51 @@ max_tool_turns = 16
 auto_context_compression = true
 context_compression_threshold = 80
 context_compression_keep_recent = 18
+load_workspace_instructions = true
 system_prompt = "You are Cinto, a local coding agent running in a terminal UI."
 developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits."
 ```
 
-Leave `api_key_env` blank or remove it for local servers that do not need bearer
-auth. When it is set, Cinto reads the secret from that environment
-variable and sends it as a bearer token. The TUI saves the variable name, not the
-secret.
+When `api_key_env` is set, Cinto reads the secret from that environment variable
+and sends it as a bearer token. The TUI stores the variable name, not the secret.
 
-`thinking_effort` can be `none`, `low`, `medium`, or `high`. Cinto sends
-it as `reasoning_effort` to compatible OpenAI-style servers. Set `stream = true`
-to render model output continuously as chunks arrive.
+## Supported Tool Formats
 
-For `gpt-oss-120b`, change `model` to the model name exposed by your local
-server and increase context/token settings on the server side.
-
-## Workspace Instructions
-
-Cinto reads `AGENTS.md` from the configured workspace root on startup and injects
-it into the model-facing developer instructions. Use it for project context,
-coding conventions, common commands, and anti-patterns to avoid.
-
-The file is optional. If present, Cinto includes a bounded copy so large
-instructions cannot dominate the prompt. Reopen `/prompt` to inspect the exact
-instructions being sent.
-
-## TUI Controls
-
-- `Tab` or `F2`: switch between Chat and Settings
-- `Enter`: send a chat message or edit/apply a setting
-- `Right`: accept the first workspace path suggestion when one is visible
-- `Up`/`Down`: move through settings
-- `Space`: toggle boolean settings
-- `s`: save settings to TOML
-- `Ctrl-C`: quit
-
-Cinto suggests workspace paths while you type path-like tokens such as
-`src/`, `Cargo`, or `docs/read`. Suggestions are read from the configured
-workspace and skip `.git`, `.cinto`, and `target`.
-
-## Safety Commands
-
-- `/git` or `/changes`: show staged, unstaged, and untracked files
-- `/stage <path|all>`: stage one or more paths, or all changes
-- `/unstage <path|all>`: unstage one or more paths, or all staged changes
-- `/commit <message>`: commit currently staged changes
-- `/diff`: show git status, diff stat, and a truncated tracked diff
-- `/checkpoint [label]`: save the current tracked diff plus status as a patch snapshot
-- `/checkpoints`: list saved checkpoint patch files
-
-Checkpoints do not commit, stash, or roll back anything. They are plain files in
-the workspace so you can inspect them before applying anything manually.
-
-## Current Scope
-
-The implemented workspace tools are:
-
-- `functions.list_files`
-- `functions.read_file`
-- `functions.write_file`
-- `functions.delete_file`
-- `functions.search`
-
-The agent can also maintain in-memory task state:
-
-- `functions.todo_read`
-- `functions.todo_write`
-
-`write_file` creates or replaces UTF-8 files beneath the configured workspace,
-and `delete_file` removes a single regular file. File edits require an explicit
-TUI approval by default; toggle `edit approval` in settings to unlock direct
-model edits.
-Shell execution is deliberately gated for a later milestone so the harness can
-grow an explicit approval flow for commands.
-
-Large tool calls and tool results render as compact transcript previews with
-size metadata plus first/last snippets. The session still keeps the full tool
-content for the active model loop.
-
-Very large tool results are also compacted before being added back to model
-context, with an explicit end marker. This prevents a large `read_file` from
-turning the next prompt into a wall of source text; the model can use `search`
-or a narrower request if it needs omitted middle sections.
-
-When `harness.auto_context_compression = true`, Cinto also watches the estimated
-prompt size against `model.context_window`. Once it reaches
-`harness.context_compression_threshold` percent, older transcript messages are
-replaced with a bounded `<CINTO_CONTEXT_COMPACTED>` outline while the most recent
-`harness.context_compression_keep_recent` messages stay exact. The TUI adds a
-visible "Context Compressed" transcript event whenever this happens.
-
-The MVP supports two prompt formats — see the section below.
-
-## Supported model formats
-
-Cinto routes the agent loop through a `PromptAdapter` chosen by
-`model.format` (TOML) or the `format` row in the Settings panel. Switch with
-`Space` or by typing the value.
-
-| Format | When to use | Tool-calling | Endpoint |
-| --- | --- | --- | --- |
-| `harmony` (default) | `gpt-oss-20b`, `gpt-oss-120b`, any model trained on the Harmony channel format | Embedded as `commentary to=functions.X` text | `/v1/chat/completions` (preferred) or `/v1/completions` |
-| `openai-tools` | Qwen 2.5 Instruct, Llama 3.1 Instruct, and other models served by **LM Studio** or **Ollama** that expose native OpenAI-style `tools` and `tool_calls` | Native `tool_calls` field | `/v1/chat/completions` |
-
-The Harmony adapter renders the channel-tagged Harmony prompt as a single
-message and parses tool calls out of the assistant text. The OpenAI adapter
-sends a structured `messages` array, advertises every workspace tool through the
-`tools` field, and reads `tool_calls` directly from the response (including
-streamed `delta.tool_calls` chunks).
-
-### LM Studio with `openai-tools`
-
-1. Load a tool-calling model (e.g. `Qwen2.5-Coder-7B-Instruct`) and start the
-   local server.
-2. Set `model.format = "openai-tools"`, `model.endpoint = "http://127.0.0.1:1234"`
-   and `model.model` to the LM Studio model id.
-3. Set `model.thinking_effort = "none"` — `reasoning_effort` is gpt-oss-only.
-
-### Ollama with `openai-tools`
-
-1. Pull a tool-capable tag (e.g. `ollama pull qwen2.5-coder:7b-instruct`).
-2. Set `model.endpoint = "http://127.0.0.1:11434"` and
-   `model.format = "openai-tools"`. Ollama exposes the OpenAI-compatible
-   chat-completions API at `/v1/chat/completions`.
-3. Leave `api_key_env` empty.
-
-Provider-specific tweaks (Anthropic, Gemini, etc.) can layer on top of
-`openai-tools` whenever the upstream server emits the same response shape.
+| Format | Tool-calling shape | Best fit |
+| --- | --- | --- |
+| `harmony` | Tool calls embedded in Harmony-style assistant text | `gpt-oss-20b`, `gpt-oss-120b`, and Harmony-compatible servers |
+| `openai-tools` | Native OpenAI-compatible `tools` and `tool_calls` fields | Qwen, Llama, Ollama, LM Studio, and other OpenAI-compatible chat servers |
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
-ask for a narrower step. Cinto returns a normal assistant message when the
-budget is exhausted instead of aborting the turn.
+ask for a narrower step. If the model returns neither text nor a tool call,
+Cinto shows an `Empty Model Response` note with the active model and format.
 
-See [docs/architecture.md](docs/architecture.md) for the design notes and next
-milestones.
-
-## Useful Commands
+## Development
 
 ```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo run -- setup
-cargo run -- --print-prompt
 cargo run
 ```
+
+Release and packaging checks:
+
+```sh
+cargo package --allow-dirty --no-verify
+sh -n install.sh
+node --check npm-package/bin/cinto.js
+npm pack --dry-run ./npm-package
+```
+
+## Project Status
+
+Cinto is early-stage and intentionally small. The current release focuses on the
+local agent loop, prompt/tool adapters, setup flow, install paths, and safety
+controls. Shell tools, provider-specific adapters, richer persistence, and
+signed binaries can layer on later.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

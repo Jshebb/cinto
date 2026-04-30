@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use crossterm::event::KeyCode;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::Style,
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 use super::{App, StatusKind, View, settings::next_format};
@@ -91,6 +91,18 @@ impl App {
             }
             KeyCode::Down => {
                 self.setup_selected = (self.setup_selected + 1) % SETUP_FIELDS.len();
+            }
+            KeyCode::PageUp => {
+                self.setup_selected = self.setup_selected.saturating_sub(4);
+            }
+            KeyCode::PageDown => {
+                self.setup_selected = (self.setup_selected + 4).min(SETUP_FIELDS.len() - 1);
+            }
+            KeyCode::Home => {
+                self.setup_selected = 0;
+            }
+            KeyCode::End => {
+                self.setup_selected = SETUP_FIELDS.len() - 1;
             }
             KeyCode::Char(' ') | KeyCode::Enter => self.activate_setup_field()?,
             _ => {}
@@ -240,15 +252,20 @@ impl App {
             return;
         }
 
+        frame.render_widget(Clear, area);
+
         let [hero_area, fields_area] = if area.width >= 100 {
             Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+                .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
                 .areas(area)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(10), Constraint::Min(10)])
+                .constraints([
+                    Constraint::Length(setup_hero_height(area.height)),
+                    Constraint::Min(8),
+                ])
                 .areas(area)
         };
 
@@ -270,21 +287,24 @@ impl App {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled("First run setup", self.theme.brand()),
-            Span::styled(" for a local coding agent harness", self.theme.dim_style()),
+            Span::styled("  choose sane defaults, then chat", self.theme.dim_style()),
         ]));
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("workspace ", self.theme.dim_style()),
-            Span::raw(self.config.harness.workspace.display().to_string()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("server    ", self.theme.dim_style()),
-            Span::raw(self.config.model.endpoint.clone()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("model     ", self.theme.dim_style()),
-            Span::raw(self.config.model.model.clone()),
-        ]));
+
+        if inner.height >= 13 {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("workspace ", self.theme.dim_style()),
+                Span::raw(self.config.harness.workspace.display().to_string()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("server    ", self.theme.dim_style()),
+                Span::raw(self.config.model.endpoint.clone()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("model     ", self.theme.dim_style()),
+                Span::raw(self.config.model.model.clone()),
+            ]));
+        }
 
         let hero = Paragraph::new(lines)
             .alignment(Alignment::Left)
@@ -298,8 +318,8 @@ impl App {
             horizontal: 2,
         });
         let mut lines = vec![Line::from(vec![
-            Span::styled("Setup", self.theme.brand()),
-            Span::styled("  choose defaults, save, then chat", self.theme.dim_style()),
+            Span::styled("Setup", self.theme.brand().add_modifier(Modifier::BOLD)),
+            Span::styled("  install-time configuration", self.theme.dim_style()),
         ])];
         lines.push(Line::raw(""));
 
@@ -337,18 +357,38 @@ impl App {
             Span::raw(" edit/apply  "),
             Span::styled("Space", self.theme.status_style(StatusKind::Ok)),
             Span::raw(" toggle  "),
+            Span::styled("PgUp/PgDn", self.theme.status_style(StatusKind::Ok)),
+            Span::raw(" jump  "),
             Span::styled("Esc", self.theme.status_style(StatusKind::Warn)),
             Span::raw(" skip"),
         ]));
 
+        let scroll = setup_scroll_offset(self.setup_selected, inner.height);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.chrome))
+            .border_type(BorderType::Rounded)
             .title(" Initial Setup ");
         let setup = Paragraph::new(lines)
             .block(block)
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false });
         frame.render_widget(setup, inner);
+
+        if let Some(editor) = &self.setup_editor {
+            let selected_line = self.setup_selected + 2;
+            let visible_y = selected_line.saturating_sub(scroll as usize);
+            let content_height = inner.height.saturating_sub(2) as usize;
+            if visible_y < content_height {
+                let cursor_x = 21usize
+                    .saturating_add(editor.chars().count())
+                    .min(inner.width.saturating_sub(2) as usize);
+                frame.set_cursor_position(Position {
+                    x: inner.x.saturating_add(1).saturating_add(cursor_x as u16),
+                    y: inner.y.saturating_add(1).saturating_add(visible_y as u16),
+                });
+            }
+        }
     }
 }
 
@@ -382,4 +422,31 @@ fn non_empty(value: String, label: &str) -> Result<String> {
         anyhow::bail!("{label} cannot be empty");
     }
     Ok(value)
+}
+
+fn setup_hero_height(area_height: u16) -> u16 {
+    if area_height >= 24 {
+        12
+    } else if area_height >= 16 {
+        8
+    } else {
+        4
+    }
+}
+
+fn setup_scroll_offset(selected: usize, visible_height: u16) -> u16 {
+    let content_height = visible_height.saturating_sub(2) as usize;
+    if content_height == 0 {
+        return 0;
+    }
+
+    let selected_line = selected + 2;
+    let top_margin = 2;
+    if selected_line < top_margin {
+        0
+    } else {
+        selected_line
+            .saturating_sub(content_height.saturating_sub(2))
+            .min(selected_line) as u16
+    }
 }

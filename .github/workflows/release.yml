@@ -47,7 +47,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build
         shell: bash
@@ -64,12 +64,22 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
           tar -C dist -czf "cinto-${{ matrix.target }}.tar.gz" "${{ matrix.binary }}"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          path = Path("cinto-${{ matrix.target }}.tar.gz")
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n")
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cinto-${{ matrix.target }}
-          path: cinto-${{ matrix.target }}.tar.gz
+          path: |
+            cinto-${{ matrix.target }}.tar.gz
+            cinto-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   publish:
@@ -87,7 +97,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/*.tar.gz \
+          gh release create "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --generate-notes

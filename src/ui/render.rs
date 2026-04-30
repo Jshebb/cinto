@@ -333,14 +333,14 @@ impl App {
                 self.status.as_str(),
                 self.theme.status_style(self.status_kind),
             ));
-            if let Some(first) = self.turn_first_token_at {
-                if let Some(tps) = tokens_per_second(self.turn_token_chars, first.elapsed()) {
-                    status_spans.push(Span::raw("   "));
-                    status_spans.push(Span::styled(
-                        format!("{tps:.0} tok/s"),
-                        self.theme.status_style(StatusKind::Working),
-                    ));
-                }
+            if let Some(first) = self.turn_first_token_at
+                && let Some(tps) = tokens_per_second(self.turn_token_chars, first.elapsed())
+            {
+                status_spans.push(Span::raw("   "));
+                status_spans.push(Span::styled(
+                    format!("{tps:.0} tok/s"),
+                    self.theme.status_style(StatusKind::Working),
+                ));
             }
         } else {
             let last_reply = self
@@ -752,13 +752,7 @@ struct MarkdownFence {
 fn fence_marker(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("```")?;
-    Some(
-        rest.trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string(),
-    )
+    Some(rest.split_whitespace().next().unwrap_or("").to_string())
 }
 
 fn fenced_block_lines(

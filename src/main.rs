@@ -5,6 +5,7 @@ mod model;
 mod session;
 mod theme;
 mod ui;
+mod uninstall;
 mod workspace;
 
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use crate::{config::Config, session::AgentSession, ui::App};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "A Harmony-based local coding harness for gpt-oss models"
+    about = "A local terminal coding-agent harness for OpenAI-compatible model servers"
 )]
 struct Args {
     #[arg(short, long)]
@@ -40,11 +41,24 @@ struct Args {
 enum Command {
     #[command(about = "Open the initial setup TUI")]
     Setup,
+    #[command(about = "Remove the installed cinto binary")]
+    Uninstall {
+        #[arg(long, help = "Remove ~/.config/cinto after removing the binary")]
+        purge_config: bool,
+
+        #[arg(long, help = "Do not ask for confirmation")]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Uninstall { purge_config, yes }) = args.command {
+        uninstall::run(purge_config, yes)?;
+        return Ok(());
+    }
+
     let config_path = args.config.clone().or_else(Config::default_path);
     let setup_requested = matches!(args.command, Some(Command::Setup));
     let first_run = setup_requested

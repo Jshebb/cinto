@@ -18,6 +18,7 @@ pub(super) enum SettingField {
     AutoContextCompression,
     ContextCompressionThreshold,
     ContextCompressionKeepRecent,
+    WorkspaceInstructions,
     ToolTurns,
     Stop,
     Workspace,
@@ -27,7 +28,7 @@ pub(super) enum SettingField {
     DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 19] = [
+pub(super) const SETTINGS: [SettingField; 20] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::Format,
@@ -40,6 +41,7 @@ pub(super) const SETTINGS: [SettingField; 19] = [
     SettingField::AutoContextCompression,
     SettingField::ContextCompressionThreshold,
     SettingField::ContextCompressionKeepRecent,
+    SettingField::WorkspaceInstructions,
     SettingField::ToolTurns,
     SettingField::Stop,
     SettingField::Workspace,
@@ -67,6 +69,7 @@ impl SettingField {
             SettingField::AutoContextCompression => "auto context compression",
             SettingField::ContextCompressionThreshold => "context compression %",
             SettingField::ContextCompressionKeepRecent => "context keep recent",
+            SettingField::WorkspaceInstructions => "workspace instructions",
             SettingField::ToolTurns => "tool turns",
             SettingField::Stop => "stop",
             SettingField::Workspace => "workspace",
@@ -96,6 +99,9 @@ impl SettingField {
             }
             SettingField::ContextCompressionKeepRecent => {
                 config.harness.context_compression_keep_recent.to_string()
+            }
+            SettingField::WorkspaceInstructions => {
+                config.harness.load_workspace_instructions.to_string()
             }
             SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
             SettingField::Stop => config.model.stop.join(","),
@@ -163,6 +169,12 @@ impl SettingField {
             SettingField::ContextCompressionKeepRecent => {
                 config.harness.context_compression_keep_recent =
                     parse_number(&value, "context keep recent")?;
+            }
+            SettingField::WorkspaceInstructions => {
+                config.harness.load_workspace_instructions = value
+                    .trim()
+                    .parse()
+                    .context("workspace instructions must be true or false")?;
             }
             SettingField::ToolTurns => {
                 config.harness.max_tool_turns = parse_number(&value, "tool turns")?;

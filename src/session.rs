@@ -59,6 +59,10 @@ pub enum TurnEvent {
         estimated_tokens: usize,
         threshold_tokens: usize,
     },
+    EmptyModelResponse {
+        format: String,
+        model: String,
+    },
     Message(Message),
 }
 
@@ -232,6 +236,13 @@ impl AgentSession {
                         let completion = result?;
                         match self.adapter.parse_response(&completion) {
                             AssistantOutput::Final(text) => {
+                                if text.trim().is_empty() {
+                                    let _ = event_tx.send(TurnEvent::EmptyModelResponse {
+                                        format: self.config.model.format.clone(),
+                                        model: self.config.model.model.clone(),
+                                    });
+                                    return Ok(());
+                                }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
                                 let _ = event_tx.send(TurnEvent::Message(message));
@@ -261,6 +272,13 @@ impl AgentSession {
                                 break;
                             }
                             AssistantOutput::Raw(text) => {
+                                if text.trim().is_empty() {
+                                    let _ = event_tx.send(TurnEvent::EmptyModelResponse {
+                                        format: self.config.model.format.clone(),
+                                        model: self.config.model.model.clone(),
+                                    });
+                                    return Ok(());
+                                }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
                                 let _ = event_tx.send(TurnEvent::Message(message));
@@ -476,6 +494,8 @@ impl AgentSession {
             .arg("--hidden")
             .arg("--glob")
             .arg("!.git")
+            .arg("--glob")
+            .arg("!.cinto")
             .arg("--")
             .arg(query)
             .arg(path)
@@ -536,13 +556,20 @@ impl AgentSession {
             return Err(anyhow!("absolute paths are not allowed: {requested}"));
         }
 
-        if requested_path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-        {
-            return Err(anyhow!(
-                "parent directory traversal is not allowed: {requested}"
-            ));
+        for part in requested_path.components() {
+            match part {
+                Component::ParentDir => {
+                    return Err(anyhow!(
+                        "parent directory traversal is not allowed: {requested}"
+                    ));
+                }
+                Component::Normal(name) if is_protected_workspace_component(name) => {
+                    return Err(anyhow!(
+                        "protected workspace path is not allowed: {requested}"
+                    ));
+                }
+                _ => {}
+            }
         }
 
         let workspace = self
@@ -570,6 +597,10 @@ impl AgentSession {
             Ok(joined)
         }
     }
+}
+
+fn is_protected_workspace_component(name: &std::ffi::OsStr) -> bool {
+    matches!(name.to_str(), Some(".git" | ".cinto"))
 }
 
 fn nearest_existing_parent(path: &Path) -> Result<PathBuf> {
@@ -654,7 +685,7 @@ fn compact_tool_context(recipient: &str, output: &str) -> String {
         }
     }
 
-    compact.push_str("\n");
+    compact.push('\n');
     compact.push_str(TOOL_OUTPUT_END);
     compact
 }
@@ -873,6 +904,56 @@ mod tests {
             fs::read_to_string(&written).expect("read written file"),
             content
         );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn read_file_rejects_git_internals() {
+        let workspace =
+            std::env::temp_dir().join(format!("cinto-read-git-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(workspace.join(".git")).expect("create fake git dir");
+        fs::write(workspace.join(".git/config"), "secret").expect("write fake git config");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let session = AgentSession::new(config);
+        let args = serde_json::json!({
+            "path": ".git/config",
+        })
+        .to_string();
+
+        let error = session
+            .read_file(&args)
+            .expect_err("protected path should fail");
+
+        assert!(error.to_string().contains("protected workspace path"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn write_file_rejects_cinto_internals() {
+        let workspace =
+            std::env::temp_dir().join(format!("cinto-write-internal-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let session = AgentSession::new(config);
+        let args = serde_json::json!({
+            "path": ".cinto/checkpoints/owned.patch",
+            "content": "nope",
+        })
+        .to_string();
+
+        let error = session
+            .write_file(&args)
+            .expect_err("protected path should fail");
+
+        assert!(error.to_string().contains("protected workspace path"));
 
         let _ = fs::remove_dir_all(&workspace);
     }

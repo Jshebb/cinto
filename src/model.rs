@@ -298,23 +298,23 @@ fn process_sse_line(
         serde_json::from_str(data).context("failed to parse stream chunk")?;
     let choice = value.get("choices").and_then(|choices| choices.get(0));
     if let Some(choice) = choice {
-        if let Some(delta) = extract_delta(choice) {
-            if !delta.is_empty() {
-                full.push_str(&delta);
-                if let Some(tx) = delta_tx {
-                    let _ = tx.send(delta);
-                }
+        if let Some(delta) = extract_delta(choice)
+            && !delta.is_empty()
+        {
+            full.push_str(&delta);
+            if let Some(tx) = delta_tx {
+                let _ = tx.send(delta);
             }
         }
         accumulate_tool_calls(choice, tool_calls);
 
         // Non-streamed payloads can come back through a single SSE-shaped line in
         // some servers — capture a complete `message.tool_calls` array as well.
-        if let Some(message) = choice.get("message") {
-            if let Some(arr) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                for (index, call) in arr.iter().enumerate() {
-                    upsert_tool_call(tool_calls, index, call);
-                }
+        if let Some(message) = choice.get("message")
+            && let Some(arr) = message.get("tool_calls").and_then(|v| v.as_array())
+        {
+            for (index, call) in arr.iter().enumerate() {
+                upsert_tool_call(tool_calls, index, call);
             }
         }
     }
@@ -354,19 +354,19 @@ fn upsert_tool_call(tool_calls: &mut Vec<PartialToolCall>, index: usize, call: &
     }
     let slot = &mut tool_calls[index];
 
-    if let Some(id) = call.get("id").and_then(serde_json::Value::as_str) {
-        if !id.is_empty() {
-            slot.id = Some(id.to_string());
-        }
+    if let Some(id) = call.get("id").and_then(serde_json::Value::as_str)
+        && !id.is_empty()
+    {
+        slot.id = Some(id.to_string());
     }
     if let Some(kind) = call.get("type").and_then(serde_json::Value::as_str) {
         slot.kind = Some(kind.to_string());
     }
     if let Some(function) = call.get("function") {
-        if let Some(name) = function.get("name").and_then(serde_json::Value::as_str) {
-            if !name.is_empty() {
-                slot.name = Some(name.to_string());
-            }
+        if let Some(name) = function.get("name").and_then(serde_json::Value::as_str)
+            && !name.is_empty()
+        {
+            slot.name = Some(name.to_string());
         }
         if let Some(args) = function
             .get("arguments")
