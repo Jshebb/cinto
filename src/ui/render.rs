@@ -30,6 +30,7 @@ impl App {
         let view = match self.view {
             View::Chat => "chat",
             View::Settings => "settings",
+            View::Setup => "setup",
         };
         let model = short_model_name(&self.config.model.model);
         if area.height == 1 {
@@ -278,6 +279,18 @@ impl App {
                 vec![Line::raw("select a setting and press Enter")],
                 self.theme.dim_style(),
             ),
+            View::Setup if self.setup_editor.is_some() => (
+                " Editing Setup ",
+                vec![Line::raw(
+                    self.setup_editor.as_deref().unwrap_or_default().to_string(),
+                )],
+                Style::default().fg(self.theme.fg),
+            ),
+            View::Setup => (
+                " Setup Mode ",
+                vec![Line::raw("choose first-run defaults and save")],
+                self.theme.dim_style(),
+            ),
         };
 
         if working {
@@ -292,7 +305,11 @@ impl App {
         }
         frame.render_widget(input, area);
 
-        if !working && (self.view == View::Chat || self.setting_editor.is_some()) {
+        if !working
+            && (self.view == View::Chat
+                || self.setting_editor.is_some()
+                || self.setup_editor.is_some())
+        {
             self.render_input_cursor(area, has_block, frame);
         }
     }
@@ -347,9 +364,13 @@ impl App {
         ));
         status_spans.push(Span::raw("  "));
         status_spans.push(Span::styled("Keys ", Style::default().fg(self.theme.muted)));
-        status_spans.push(Span::raw(
-            "F2 settings  F3 sidebar  F4 header  PgUp/PgDn scroll  Ctrl-C quit",
-        ));
+        let keys = match self.view {
+            View::Setup => "Enter edit/apply  Space toggle  Esc skip  Ctrl-C quit",
+            View::Chat | View::Settings => {
+                "F2 settings  F3 sidebar  F4 header  PgUp/PgDn scroll  Ctrl-C quit"
+            }
+        };
+        status_spans.push(Span::raw(keys));
 
         let status = Paragraph::new(Line::from(status_spans)).alignment(Alignment::Left);
         frame.render_widget(status, area);
@@ -611,6 +632,12 @@ impl App {
             View::Chat => self.input.chars().count(),
             View::Settings => self
                 .setting_editor
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .count(),
+            View::Setup => self
+                .setup_editor
                 .as_deref()
                 .unwrap_or_default()
                 .chars()

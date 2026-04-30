@@ -27,7 +27,22 @@ renderer/parser for servers that accept pre-tokenized prompts.
   bearer auth from an environment variable
 - `session`: owns conversation history, tool execution, and tool-loop depth
 - `ui`: provides the ratatui/crossterm terminal interface, including the `[◉]`
-  chat and settings views
+  chat, setup, and settings views
+
+## First-Run Setup
+
+If no config file exists, Cinto starts in a setup view instead of dropping the
+user directly into chat. The setup view shows a large `CINTO` greeter and lets
+the user choose a server preset, endpoint, model, prompt format, workspace, and
+core safety defaults. Saving writes the normal config file and switches to chat.
+The same screen is available later through `cinto setup` or `/setup`.
+
+## Workspace Instructions
+
+Cinto reads an optional `AGENTS.md` from the configured workspace root when the
+session adapter is built. The file is appended to the developer instructions for
+both Harmony and OpenAI tool-calling adapters, so project context applies across
+model formats. The loaded content is bounded to keep prompt size predictable.
 
 ## Tool Policy
 
@@ -84,6 +99,16 @@ history. The compacted message includes original size metadata, first/last
 sections, guidance to use search or narrower reads, and an explicit
 `<CINTO_TOOL_OUTPUT_END>` marker. This keeps local models from spending a
 turn continuing or reprocessing a huge tool blob.
+
+The session also supports automatic context compression for long-running chats.
+When enabled, the session estimates prompt size from the adapter-rendered
+request and compares it to `model.context_window`. If the prompt reaches
+`harness.context_compression_threshold` percent of that window, older messages
+are replaced by a bounded `<CINTO_CONTEXT_COMPACTED>` outline while the latest
+`harness.context_compression_keep_recent` messages are preserved exactly. The
+compression is deterministic for now; a model-generated summary can be added
+later once there is a clear approval and failure story around spending an extra
+model call.
 
 Workspace path suggestions are local UI affordances. They scan the configured
 workspace for path-like input tokens, skip noisy directories such as `.git`,

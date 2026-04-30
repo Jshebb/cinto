@@ -40,10 +40,7 @@ impl Theme {
         use ratatui::text::{Line, Span};
 
         vec![
-            Line::from(vec![Span::styled(
-                "█▀▀ █ █▄ █ ▀█▀ █▀█",
-                self.brand(),
-            )]),
+            Line::from(vec![Span::styled("█▀▀ █ █▄ █ ▀█▀ █▀█", self.brand())]),
             Line::from(vec![Span::styled(
                 "█▄▄ █ █ ▀█  █  █▄█",
                 self.brand_subtle(),
@@ -52,6 +49,42 @@ impl Theme {
                 Span::styled("╾══════", self.dim_style()),
                 Span::styled("[◉]", self.buckle()),
                 Span::styled("══════╼", self.dim_style()),
+            ]),
+        ]
+    }
+
+    pub fn large_logo_lines(&self) -> Vec<ratatui::text::Line<'static>> {
+        use ratatui::text::{Line, Span};
+
+        vec![
+            Line::from(vec![Span::styled(
+                " ██████╗██╗███╗   ██╗████████╗ ██████╗ ",
+                self.brand(),
+            )]),
+            Line::from(vec![Span::styled(
+                "██╔════╝██║████╗  ██║╚══██╔══╝██╔═══██╗",
+                self.brand(),
+            )]),
+            Line::from(vec![Span::styled(
+                "██║     ██║██╔██╗ ██║   ██║   ██║   ██║",
+                self.brand_subtle(),
+            )]),
+            Line::from(vec![Span::styled(
+                "██║     ██║██║╚██╗██║   ██║   ██║   ██║",
+                self.brand_subtle(),
+            )]),
+            Line::from(vec![Span::styled(
+                "╚██████╗██║██║ ╚████║   ██║   ╚██████╔╝",
+                self.brand(),
+            )]),
+            Line::from(vec![Span::styled(
+                " ╚═════╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ",
+                self.dim_style(),
+            )]),
+            Line::from(vec![
+                Span::styled("╾══════════════", self.dim_style()),
+                Span::styled("[◉]", self.buckle()),
+                Span::styled("══════════════╼", self.dim_style()),
             ]),
         ]
     }
@@ -122,9 +155,7 @@ pub enum StatusKind {
 pub const BRAND_NAME: &str = "[◉]";
 pub const BRAND_WORDMARK: &str = "Cinto";
 
-pub const WAVE_FRAMES: &[&str] = &[
-    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂",
-];
+pub const WAVE_FRAMES: &[&str] = &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂"];
 
 pub const THINKING_FLAVOR: &[&str] = &[
     "Reading the room",

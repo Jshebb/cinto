@@ -1,0 +1,26 @@
+{
+  "name": "cinto",
+  "version": "0.1.0",
+  "description": "A local terminal coding-agent harness for OpenAI-compatible model servers",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joaoh/cinto.git"
+  },
+  "bin": {
+    "cinto": "bin/cinto.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "@cinto/linux-x64": "0.1.0",
+    "@cinto/linux-arm64": "0.1.0",
+    "@cinto/darwin-x64": "0.1.0",
+    "@cinto/darwin-arm64": "0.1.0",
+    "@cinto/win32-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

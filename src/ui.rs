@@ -31,11 +31,13 @@ mod formatting;
 mod layout;
 mod render;
 mod settings;
+mod setup;
 mod transcript;
 
 use self::{
     layout::app_areas,
     settings::{SETTINGS, SettingField, next_format, next_thinking_effort},
+    setup::SetupPreset,
     transcript::TranscriptItem,
 };
 
@@ -43,6 +45,7 @@ use self::{
 enum View {
     Chat,
     Settings,
+    Setup,
 }
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
@@ -75,6 +78,9 @@ pub struct App {
     view: View,
     selected_setting: usize,
     setting_editor: Option<String>,
+    setup_selected: usize,
+    setup_editor: Option<String>,
+    setup_preset: SetupPreset,
     sidebar_visible: bool,
     header_expanded: bool,
     chat_scroll: u16,
@@ -98,12 +104,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(session: AgentSession, config_path: Option<PathBuf>) -> Self {
+    pub fn new(session: AgentSession, config_path: Option<PathBuf>, first_run: bool) -> Self {
         let config = session.config().clone();
         let estimated_tokens = session.estimated_prompt_tokens();
         let history_len = session.history_len();
         let todo_details = session.todo_details();
         let todo_status_line = session.todo_status_line();
+        let setup_preset = SetupPreset::from_endpoint(&config.model.endpoint);
 
         Self {
             session: Some(session),
@@ -118,9 +125,12 @@ impl App {
             path_suggestion_range: None,
             status: "idle".to_string(),
             status_kind: StatusKind::Idle,
-            view: View::Chat,
+            view: if first_run { View::Setup } else { View::Chat },
             selected_setting: 0,
             setting_editor: None,
+            setup_selected: 0,
+            setup_editor: None,
+            setup_preset,
             sidebar_visible: true,
             header_expanded: false,
             chat_scroll: 0,
@@ -177,6 +187,7 @@ impl App {
                 match self.view {
                     View::Chat => self.render_chat(areas.body, frame),
                     View::Settings => self.render_settings(areas.body, frame),
+                    View::Setup => self.render_setup(areas.body, frame),
                 }
                 self.render_input(areas.input, frame);
                 self.render_footer(areas.footer, frame);
@@ -215,6 +226,7 @@ impl App {
                         }
                     }
                     View::Settings => self.handle_settings_key(key.code)?,
+                    View::Setup => self.handle_setup_key(key.code)?,
                 }
             }
         }
@@ -269,6 +281,11 @@ impl App {
             "/quit" | "/exit" => return Ok(true),
             "/settings" => {
                 self.view = View::Settings;
+                self.clear_path_suggestions();
+                return Ok(false);
+            }
+            "/setup" => {
+                self.view = View::Setup;
                 self.clear_path_suggestions();
                 return Ok(false);
             }
@@ -552,6 +569,22 @@ impl App {
                 self.status_kind = StatusKind::Warn;
                 self.follow_tail = true;
             }
+            TurnEvent::ContextCompacted {
+                original_messages,
+                kept_messages,
+                estimated_tokens,
+                threshold_tokens,
+            } => {
+                self.transcript.push(TranscriptItem::system(
+                    "Context Compressed",
+                    format!(
+                        "Compacted earlier model context at ~{estimated_tokens}/{threshold_tokens} tokens. Kept {kept_messages} recent messages from {original_messages} total."
+                    ),
+                ));
+                self.status = "context compressed".to_string();
+                self.status_kind = StatusKind::Ok;
+                self.follow_tail = true;
+            }
             TurnEvent::Message(message) => {
                 if message.role == Role::Assistant && message.channel == Some(Channel::Final) {
                     if let Some(index) = self.stream_item_index.take() {
@@ -592,6 +625,8 @@ impl App {
     fn input_height(&self) -> u16 {
         if self.pending_tool_approval.is_some() {
             2
+        } else if self.view == View::Setup {
+            self.setup_input_height()
         } else if self.view == View::Chat && self.is_busy() {
             2
         } else if self.view == View::Chat && self.input.is_empty() {
@@ -883,6 +918,7 @@ impl App {
             SettingField::AllowShell
                 | SettingField::EditApproval
                 | SettingField::Stream
+                | SettingField::AutoContextCompression
                 | SettingField::ThinkingEffort
                 | SettingField::Format
         ) {
@@ -911,6 +947,9 @@ impl App {
             }
             SettingField::Stream => {
                 config.model.stream = !config.model.stream;
+            }
+            SettingField::AutoContextCompression => {
+                config.harness.auto_context_compression = !config.harness.auto_context_compression;
             }
             SettingField::ThinkingEffort => {
                 config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);

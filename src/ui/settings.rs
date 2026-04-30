@@ -15,6 +15,9 @@ pub(super) enum SettingField {
     ThinkingEffort,
     Stream,
     Timeout,
+    AutoContextCompression,
+    ContextCompressionThreshold,
+    ContextCompressionKeepRecent,
     ToolTurns,
     Stop,
     Workspace,
@@ -24,7 +27,7 @@ pub(super) enum SettingField {
     DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 16] = [
+pub(super) const SETTINGS: [SettingField; 19] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::Format,
@@ -34,6 +37,9 @@ pub(super) const SETTINGS: [SettingField; 16] = [
     SettingField::ThinkingEffort,
     SettingField::Stream,
     SettingField::Timeout,
+    SettingField::AutoContextCompression,
+    SettingField::ContextCompressionThreshold,
+    SettingField::ContextCompressionKeepRecent,
     SettingField::ToolTurns,
     SettingField::Stop,
     SettingField::Workspace,
@@ -58,6 +64,9 @@ impl SettingField {
             SettingField::ThinkingEffort => "thinking",
             SettingField::Stream => "stream",
             SettingField::Timeout => "timeout secs",
+            SettingField::AutoContextCompression => "auto context compression",
+            SettingField::ContextCompressionThreshold => "context compression %",
+            SettingField::ContextCompressionKeepRecent => "context keep recent",
             SettingField::ToolTurns => "tool turns",
             SettingField::Stop => "stop",
             SettingField::Workspace => "workspace",
@@ -79,6 +88,15 @@ impl SettingField {
             SettingField::ThinkingEffort => config.model.thinking_effort.clone(),
             SettingField::Stream => config.model.stream.to_string(),
             SettingField::Timeout => config.model.request_timeout_secs.to_string(),
+            SettingField::AutoContextCompression => {
+                config.harness.auto_context_compression.to_string()
+            }
+            SettingField::ContextCompressionThreshold => {
+                config.harness.context_compression_threshold.to_string()
+            }
+            SettingField::ContextCompressionKeepRecent => {
+                config.harness.context_compression_keep_recent.to_string()
+            }
             SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
             SettingField::Stop => config.model.stop.join(","),
             SettingField::Workspace => config.harness.workspace.display().to_string(),
@@ -129,6 +147,23 @@ impl SettingField {
             SettingField::Timeout => {
                 config.model.request_timeout_secs = parse_number(&value, "timeout secs")?;
             }
+            SettingField::AutoContextCompression => {
+                config.harness.auto_context_compression = value
+                    .trim()
+                    .parse()
+                    .context("auto context compression must be true or false")?;
+            }
+            SettingField::ContextCompressionThreshold => {
+                let threshold = parse_number(&value, "context compression %")?;
+                if !(10..=100).contains(&threshold) {
+                    return Err(anyhow!("context compression % must be between 10 and 100"));
+                }
+                config.harness.context_compression_threshold = threshold;
+            }
+            SettingField::ContextCompressionKeepRecent => {
+                config.harness.context_compression_keep_recent =
+                    parse_number(&value, "context keep recent")?;
+            }
             SettingField::ToolTurns => {
                 config.harness.max_tool_turns = parse_number(&value, "tool turns")?;
             }
@@ -156,7 +191,8 @@ impl SettingField {
                     .context("allow shell must be true or false")?;
             }
             SettingField::SystemPrompt => {
-                config.harness.system_prompt = unescape_newlines(&non_empty(value, "system prompt")?);
+                config.harness.system_prompt =
+                    unescape_newlines(&non_empty(value, "system prompt")?);
             }
             SettingField::DeveloperPrompt => {
                 config.harness.developer_prompt =

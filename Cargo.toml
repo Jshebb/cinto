@@ -2,6 +2,13 @@
 name = "cinto"
 version = "0.1.0"
 edition = "2024"
+authors = ["Joao H."]
+description = "A local terminal coding-agent harness for OpenAI-compatible model servers"
+license = "MIT"
+repository = "https://github.com/joaoh/cinto"
+readme = "README.md"
+keywords = ["agent", "cli", "llm", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"

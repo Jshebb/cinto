@@ -1,0 +1,82 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.1.0"
+        required: true
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check npm token
+        id: npm-token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN is not configured; skipping npm publish."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.npm-token.outputs.present == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.npm-token.outputs.present == 'true'
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download release assets
+        if: steps.npm-token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          mkdir -p npm-dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'cinto-*.tar.gz' --dir npm-dist
+
+      - name: Prepare platform packages
+        if: steps.npm-token.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -eu
+          prepare() {
+            target="$1"
+            package_dir="$2"
+            binary="$3"
+            mkdir -p "$package_dir/bin"
+            tar -xzf "npm-dist/cinto-$target.tar.gz" -C "$package_dir/bin" "$binary"
+            chmod 755 "$package_dir/bin/$binary"
+          }
+
+          prepare x86_64-unknown-linux-gnu npm-package/platforms/linux-x64 cinto
+          prepare aarch64-unknown-linux-gnu npm-package/platforms/linux-arm64 cinto
+          prepare x86_64-apple-darwin npm-package/platforms/darwin-x64 cinto
+          prepare aarch64-apple-darwin npm-package/platforms/darwin-arm64 cinto
+          prepare x86_64-pc-windows-msvc npm-package/platforms/win32-x64 cinto.exe
+
+      - name: Publish platform packages
+        if: steps.npm-token.outputs.present == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for package_dir in npm-package/platforms/*; do
+            npm publish "$package_dir" --access public
+          done
+
+      - name: Publish meta package
+        if: steps.npm-token.outputs.present == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish npm-package --access public

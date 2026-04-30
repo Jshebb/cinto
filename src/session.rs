@@ -10,14 +10,16 @@ use serde_json::Value;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
+    adapter::{AssistantOutput, PromptAdapter, build_adapter},
     config::Config,
-    harmony::{AssistantOutput, HarmonyPrompt, available_tool_details, parse_assistant_output},
     model::ModelClient,
 };
 
 const MAX_TOOL_CONTEXT_CHARS: usize = 8_000;
 const MAX_TOOL_CONTEXT_LINES: usize = 220;
 const TOOL_OUTPUT_END: &str = "<CINTO_TOOL_OUTPUT_END>";
+const CONTEXT_COMPACTED_MARKER: &str = "<CINTO_CONTEXT_COMPACTED>";
+const MAX_CONTEXT_SUMMARY_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -50,6 +52,12 @@ pub enum TurnEvent {
         recipient: String,
         summary: String,
         response_tx: oneshot::Sender<bool>,
+    },
+    ContextCompacted {
+        original_messages: usize,
+        kept_messages: usize,
+        estimated_tokens: usize,
+        threshold_tokens: usize,
     },
     Message(Message),
 }
@@ -95,7 +103,7 @@ impl Message {
 #[derive(Debug)]
 pub struct AgentSession {
     config: Config,
-    prompt: HarmonyPrompt,
+    adapter: Box<dyn PromptAdapter>,
     client: ModelClient,
     history: Vec<Message>,
     todos: Vec<TodoItem>,
@@ -103,15 +111,21 @@ pub struct AgentSession {
 
 impl AgentSession {
     pub fn new(config: Config) -> Self {
-        let prompt = HarmonyPrompt::new(
-            config.harness.system_prompt.clone(),
-            config.harness.developer_prompt.clone(),
-        );
+        let adapter = build_adapter(&config).unwrap_or_else(|error| {
+            eprintln!("warning: {error}; falling back to harmony adapter");
+            Box::new(crate::adapter::HarmonyAdapter::new(
+                config.harness.system_prompt.clone(),
+                format!(
+                    "{}\n\nAGENTS.md instructions were not loaded because adapter initialization failed.",
+                    config.harness.developer_prompt
+                ),
+            ))
+        });
         let client = ModelClient::new(config.model.clone());
 
         Self {
             config,
-            prompt,
+            adapter,
             client,
             history: Vec::new(),
             todos: Vec::new(),
@@ -128,16 +142,22 @@ impl AgentSession {
     }
 
     pub fn update_config(&mut self, config: Config) {
-        self.prompt = HarmonyPrompt::new(
-            config.harness.system_prompt.clone(),
-            config.harness.developer_prompt.clone(),
-        );
+        self.adapter = build_adapter(&config).unwrap_or_else(|error| {
+            eprintln!("warning: {error}; falling back to harmony adapter");
+            Box::new(crate::adapter::HarmonyAdapter::new(
+                config.harness.system_prompt.clone(),
+                format!(
+                    "{}\n\nAGENTS.md instructions were not loaded because adapter initialization failed.",
+                    config.harness.developer_prompt
+                ),
+            ))
+        });
         self.client = ModelClient::new(config.model.clone());
         self.config = config;
     }
 
     pub fn render_prompt(&self) -> String {
-        self.prompt.render(&self.history)
+        self.adapter.debug_render(&self.history)
     }
 
     pub fn estimated_prompt_tokens(&self) -> usize {
@@ -149,7 +169,7 @@ impl AgentSession {
     }
 
     pub fn tool_details(&self) -> String {
-        available_tool_details()
+        self.adapter.tool_details()
     }
 
     pub fn todo_details(&self) -> String {
@@ -197,17 +217,20 @@ impl AgentSession {
         let max_tool_turns = self.config.harness.max_tool_turns.max(1);
 
         for _ in 0..max_tool_turns {
-            let prompt = self.render_prompt();
+            if let Some(event) = self.compact_context_if_needed() {
+                let _ = event_tx.send(event);
+            }
+            let payload = self.adapter.render_request(&self.history);
             let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
             let client = self.client.clone();
-            let completion = client.complete_streaming(prompt, delta_tx);
+            let completion = client.complete_streaming(payload, delta_tx);
 
             tokio::pin!(completion);
             loop {
                 tokio::select! {
                     result = &mut completion => {
                         let completion = result?;
-                        match parse_assistant_output(&completion) {
+                        match self.adapter.parse_response(&completion) {
                             AssistantOutput::Final(text) => {
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
@@ -258,6 +281,53 @@ impl AgentSession {
         self.history.push(message.clone());
         let _ = event_tx.send(TurnEvent::Message(message));
         Ok(())
+    }
+
+    fn compact_context_if_needed(&mut self) -> Option<TurnEvent> {
+        if !self.config.harness.auto_context_compression {
+            return None;
+        }
+
+        let context_window = self.config.model.context_window.max(1) as usize;
+        let threshold_percent = self
+            .config
+            .harness
+            .context_compression_threshold
+            .clamp(10, 100) as usize;
+        let threshold_tokens = (context_window * threshold_percent / 100).max(1);
+        let estimated_tokens = self.estimated_prompt_tokens();
+        if estimated_tokens < threshold_tokens {
+            return None;
+        }
+
+        let keep_recent = self.config.harness.context_compression_keep_recent.max(4) as usize;
+        if self.history.len() <= keep_recent + 2 {
+            return None;
+        }
+
+        let original_messages = self.history.len();
+        let mut split_at = self.history.len().saturating_sub(keep_recent);
+        while split_at < self.history.len() && self.history[split_at].role == Role::Tool {
+            split_at += 1;
+        }
+        if split_at == 0 || split_at >= self.history.len() {
+            return None;
+        }
+
+        let compacted = build_context_summary(&self.history[..split_at]);
+        let kept = self.history[split_at..].to_vec();
+        let kept_messages = kept.len();
+
+        self.history.clear();
+        self.history.push(Message::user(compacted));
+        self.history.extend(kept);
+
+        Some(TurnEvent::ContextCompacted {
+            original_messages,
+            kept_messages,
+            estimated_tokens,
+            threshold_tokens,
+        })
     }
 
     fn execute_tool(&mut self, recipient: &str, arguments: &str) -> Result<String> {
@@ -589,6 +659,66 @@ fn compact_tool_context(recipient: &str, output: &str) -> String {
     compact
 }
 
+fn build_context_summary(messages: &[Message]) -> String {
+    let mut summary = format!(
+        "{CONTEXT_COMPACTED_MARKER}\nCinto automatically compacted earlier model context.\nCompacted messages: {}\nRecent messages after this note remain exact.\n\nEarlier transcript outline:\n",
+        messages.len()
+    );
+    let mut omitted = 0usize;
+
+    for message in messages {
+        let line = summarize_message(message);
+        let next_len = summary.chars().count() + line.chars().count() + 3;
+        if next_len > MAX_CONTEXT_SUMMARY_CHARS {
+            omitted += 1;
+            continue;
+        }
+        summary.push_str("- ");
+        summary.push_str(&line);
+        summary.push('\n');
+    }
+
+    if omitted > 0 {
+        summary.push_str(&format!("- ... {omitted} older outline entries omitted\n"));
+    }
+
+    summary.trim_end().to_string()
+}
+
+fn summarize_message(message: &Message) -> String {
+    let role = match message.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let channel = match message.channel {
+        Some(Channel::Analysis) => " analysis",
+        Some(Channel::Commentary) => " commentary",
+        Some(Channel::Final) => " final",
+        None => "",
+    };
+    let recipient = message
+        .recipient
+        .as_deref()
+        .map(clean_recipient)
+        .map(|value| format!(" to {value}"))
+        .unwrap_or_default();
+    let content = compact_inline(&message.content, 240);
+
+    format!("{role}{channel}{recipient}: {content}")
+}
+
+fn compact_inline(value: &str, max_chars: usize) -> String {
+    let one_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+
+    let mut compact = one_line.chars().take(max_chars).collect::<String>();
+    compact.push_str("...");
+    compact
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     title: String,
@@ -827,5 +957,77 @@ mod tests {
         assert!(error.to_string().contains("parent directory traversal"));
 
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn auto_context_compression_keeps_recent_history() {
+        let mut config = Config::default();
+        config.model.context_window = 80;
+        config.harness.context_compression_threshold = 10;
+        config.harness.context_compression_keep_recent = 4;
+        let mut session = AgentSession::new(config);
+
+        for index in 0..12 {
+            session.history.push(Message::user(format!(
+                "old user message {index} {}",
+                "x".repeat(80)
+            )));
+            session.history.push(Message::assistant_final(format!(
+                "old assistant message {index} {}",
+                "y".repeat(80)
+            )));
+        }
+
+        let event = session
+            .compact_context_if_needed()
+            .expect("context should compact");
+
+        assert!(matches!(event, TurnEvent::ContextCompacted { .. }));
+        assert!(
+            session.history[0]
+                .content
+                .contains(CONTEXT_COMPACTED_MARKER)
+        );
+        assert!(
+            session.history[0]
+                .content
+                .contains("Earlier transcript outline")
+        );
+        assert_eq!(session.history.len(), 5);
+        assert!(session.history[1].content.contains("old user message 10"));
+        assert!(
+            session.history[4]
+                .content
+                .contains("old assistant message 11")
+        );
+    }
+
+    #[test]
+    fn auto_context_compression_does_not_start_tail_with_tool_result() {
+        let mut config = Config::default();
+        config.model.context_window = 80;
+        config.harness.context_compression_threshold = 10;
+        config.harness.context_compression_keep_recent = 4;
+        let mut session = AgentSession::new(config);
+
+        for index in 0..8 {
+            session
+                .history
+                .push(Message::user(format!("message {index} {}", "x".repeat(80))));
+        }
+        session.history.push(Message::assistant_tool_call(
+            "functions.read_file",
+            "{\"path\":\"x\"}",
+        ));
+        session
+            .history
+            .push(Message::tool("functions.read_file", "contents"));
+        session.history.push(Message::assistant_final("done"));
+
+        session
+            .compact_context_if_needed()
+            .expect("context should compact");
+
+        assert_ne!(session.history[1].role, Role::Tool);
     }
 }

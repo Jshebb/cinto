@@ -18,13 +18,54 @@ The first milestone is intentionally small:
 format explicit so local inference servers can be swapped while the harness keeps
 control over agent state, tools, and workspace policy.
 
+## Install
+
+The release build ships precompiled binaries for Linux, macOS, and Windows.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joaoh/cinto/main/install.sh | sh
+```
+
+The installer detects the current platform, downloads the latest matching
+`cinto-<target>.tar.gz` from GitHub Releases, and installs `cinto` into
+`${XDG_BIN_HOME:-$HOME/.local/bin}`. Override the destination with
+`CINTO_INSTALL_DIR=/path/to/bin`.
+
+Node users can install the npm wrapper, which depends on the matching optional
+platform package:
+
+```sh
+npm install -g cinto
+npx cinto
+```
+
+For source builds or Rust development:
+
+```sh
+cargo install --git https://github.com/joaoh/cinto
+```
+
 ## Quick Start
 
 Start a local server that exposes `/v1/completions`, then run:
 
 ```sh
-cargo run
+cinto
 ```
+
+From a source checkout, use `cargo run` instead.
+
+On first run, Cinto opens a setup TUI with a large `CINTO` greeter. Pick a
+server preset, confirm the endpoint/model/workspace, then save and enter chat.
+You can reopen it later with:
+
+```sh
+cinto setup
+# or inside the TUI
+/setup
+```
+
+Use `cinto --skip-setup` to go straight to chat even when no config file exists.
 
 The default endpoint is LM Studio's local server base URL:
 
@@ -51,6 +92,7 @@ Create `~/.config/cinto/config.toml` or pass `--config path/to/config.toml`.
 [model]
 endpoint = "http://127.0.0.1:1234"
 model = "openai/gpt-oss-20b"
+format = "harmony"            # or "openai-tools" for Qwen / Llama / etc.
 api_key_env = "OPENAI_API_KEY"
 max_tokens = 4096
 temperature = 0.2
@@ -63,7 +105,11 @@ context_window = 8192
 [harness]
 workspace = "/home/you/project"
 allow_shell = false
+require_edit_approval = true
 max_tool_turns = 16
+auto_context_compression = true
+context_compression_threshold = 80
+context_compression_keep_recent = 18
 system_prompt = "You are Cinto, a local coding agent running in a terminal UI."
 developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits."
 ```
@@ -79,6 +125,16 @@ to render model output continuously as chunks arrive.
 
 For `gpt-oss-120b`, change `model` to the model name exposed by your local
 server and increase context/token settings on the server side.
+
+## Workspace Instructions
+
+Cinto reads `AGENTS.md` from the configured workspace root on startup and injects
+it into the model-facing developer instructions. Use it for project context,
+coding conventions, common commands, and anti-patterns to avoid.
+
+The file is optional. If present, Cinto includes a bounded copy so large
+instructions cannot dominate the prompt. Reopen `/prompt` to inspect the exact
+instructions being sent.
 
 ## TUI Controls
 
@@ -138,11 +194,50 @@ context, with an explicit end marker. This prevents a large `read_file` from
 turning the next prompt into a wall of source text; the model can use `search`
 or a narrower request if it needs omitted middle sections.
 
-The MVP should stay focused on Harmony-capable `gpt-oss` models behind
-OpenAI-compatible local or remote endpoints. External APIs can fit the same
-endpoint/auth shape when they are OpenAI-compatible, but provider-specific
-adapters and non-Harmony prompt formats for model families such as Qwen or Gemma
-should wait until the agent loop, tool visibility, and task tracking are solid.
+When `harness.auto_context_compression = true`, Cinto also watches the estimated
+prompt size against `model.context_window`. Once it reaches
+`harness.context_compression_threshold` percent, older transcript messages are
+replaced with a bounded `<CINTO_CONTEXT_COMPACTED>` outline while the most recent
+`harness.context_compression_keep_recent` messages stay exact. The TUI adds a
+visible "Context Compressed" transcript event whenever this happens.
+
+The MVP supports two prompt formats — see the section below.
+
+## Supported model formats
+
+Cinto routes the agent loop through a `PromptAdapter` chosen by
+`model.format` (TOML) or the `format` row in the Settings panel. Switch with
+`Space` or by typing the value.
+
+| Format | When to use | Tool-calling | Endpoint |
+| --- | --- | --- | --- |
+| `harmony` (default) | `gpt-oss-20b`, `gpt-oss-120b`, any model trained on the Harmony channel format | Embedded as `commentary to=functions.X` text | `/v1/chat/completions` (preferred) or `/v1/completions` |
+| `openai-tools` | Qwen 2.5 Instruct, Llama 3.1 Instruct, and other models served by **LM Studio** or **Ollama** that expose native OpenAI-style `tools` and `tool_calls` | Native `tool_calls` field | `/v1/chat/completions` |
+
+The Harmony adapter renders the channel-tagged Harmony prompt as a single
+message and parses tool calls out of the assistant text. The OpenAI adapter
+sends a structured `messages` array, advertises every workspace tool through the
+`tools` field, and reads `tool_calls` directly from the response (including
+streamed `delta.tool_calls` chunks).
+
+### LM Studio with `openai-tools`
+
+1. Load a tool-calling model (e.g. `Qwen2.5-Coder-7B-Instruct`) and start the
+   local server.
+2. Set `model.format = "openai-tools"`, `model.endpoint = "http://127.0.0.1:1234"`
+   and `model.model` to the LM Studio model id.
+3. Set `model.thinking_effort = "none"` — `reasoning_effort` is gpt-oss-only.
+
+### Ollama with `openai-tools`
+
+1. Pull a tool-capable tag (e.g. `ollama pull qwen2.5-coder:7b-instruct`).
+2. Set `model.endpoint = "http://127.0.0.1:11434"` and
+   `model.format = "openai-tools"`. Ollama exposes the OpenAI-compatible
+   chat-completions API at `/v1/chat/completions`.
+3. Leave `api_key_env` empty.
+
+Provider-specific tweaks (Anthropic, Gemini, etc.) can layer on top of
+`openai-tools` whenever the upstream server emits the same response shape.
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
 ask for a narrower step. Cinto returns a normal assistant message when the
@@ -155,6 +250,7 @@ milestones.
 
 ```sh
 cargo test
+cargo run -- setup
 cargo run -- --print-prompt
 cargo run
 ```
