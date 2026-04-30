@@ -105,7 +105,7 @@ impl TranscriptRole {
     pub(super) fn label(self) -> &'static str {
         match self {
             TranscriptRole::User => "USER",
-            TranscriptRole::Assistant => "OH",
+            TranscriptRole::Assistant => "CINTO",
             TranscriptRole::Tool => "TOOL",
             TranscriptRole::System => "SYS",
             TranscriptRole::Error => "ERR",
