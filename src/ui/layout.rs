@@ -8,7 +8,12 @@ pub(super) struct AppAreas {
     pub(super) footer: Rect,
 }
 
-pub(super) fn app_areas(area: Rect, desired_input_height: u16) -> AppAreas {
+pub(super) fn app_areas(
+    area: Rect,
+    desired_header_height: u16,
+    desired_input_height: u16,
+    desired_footer_height: u16,
+) -> AppAreas {
     let input_height = desired_input_height.min(area.height);
     let input_y = area
         .y
@@ -21,7 +26,11 @@ pub(super) fn app_areas(area: Rect, desired_input_height: u16) -> AppAreas {
     };
 
     let above_input = area.height.saturating_sub(input_height);
-    let footer_height = if above_input >= 8 { 2 } else { 0 };
+    let footer_height = if above_input >= 5 {
+        desired_footer_height.min(above_input)
+    } else {
+        0
+    };
     let footer_y = input_y.saturating_sub(footer_height);
     let footer = Rect {
         x: area.x,
@@ -31,7 +40,7 @@ pub(super) fn app_areas(area: Rect, desired_input_height: u16) -> AppAreas {
     };
 
     let above_footer = above_input.saturating_sub(footer_height);
-    let header_height = above_footer.min(4);
+    let header_height = desired_header_height.min(above_footer);
     let header = Rect {
         x: area.x,
         y: area.y,

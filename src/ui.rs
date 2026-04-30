@@ -12,7 +12,10 @@ use crossterm::{
 };
 use ratatui::prelude::{CrosstermBackend, Terminal};
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, unbounded_channel},
+    sync::{
+        mpsc::{UnboundedReceiver, unbounded_channel},
+        oneshot,
+    },
     task::JoinHandle,
 };
 
@@ -44,6 +47,12 @@ enum View {
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
 
+struct PendingToolApproval {
+    recipient: String,
+    summary: String,
+    response_tx: oneshot::Sender<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamPhase {
     Idle,
@@ -66,14 +75,18 @@ pub struct App {
     view: View,
     selected_setting: usize,
     setting_editor: Option<String>,
+    sidebar_visible: bool,
+    header_expanded: bool,
     chat_scroll: u16,
     follow_tail: bool,
     spinner_tick: u64,
     send_task: Option<TurnTask>,
     stream_rx: Option<UnboundedReceiver<TurnEvent>>,
     stream_item_index: Option<usize>,
+    pending_tool_approval: Option<PendingToolApproval>,
     busy_since: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
+    last_reply_at: Option<Instant>,
     stream_phase: StreamPhase,
     turn_first_token_at: Option<Instant>,
     turn_token_chars: usize,
@@ -108,14 +121,18 @@ impl App {
             view: View::Chat,
             selected_setting: 0,
             setting_editor: None,
+            sidebar_visible: true,
+            header_expanded: false,
             chat_scroll: 0,
             follow_tail: true,
             spinner_tick: 0,
             send_task: None,
             stream_rx: None,
             stream_item_index: None,
+            pending_tool_approval: None,
             busy_since: None,
             last_turn_elapsed: None,
+            last_reply_at: None,
             stream_phase: StreamPhase::Idle,
             turn_first_token_at: None,
             turn_token_chars: 0,
@@ -152,8 +169,9 @@ impl App {
             self.finish_completed_turn().await?;
 
             terminal.draw(|frame| {
+                let header_height = self.header_height();
                 let input_height = self.input_height();
-                let areas = app_areas(frame.area(), input_height);
+                let areas = app_areas(frame.area(), header_height, input_height, 1);
 
                 self.render_header(areas.header, frame);
                 match self.view {
@@ -177,6 +195,17 @@ impl App {
 
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     return Ok(());
+                }
+                if self.handle_approval_key(key.code) {
+                    continue;
+                }
+                if key.code == KeyCode::F(3) {
+                    self.sidebar_visible = !self.sidebar_visible;
+                    continue;
+                }
+                if key.code == KeyCode::F(4) {
+                    self.header_expanded = !self.header_expanded;
+                    continue;
                 }
 
                 match self.view {
@@ -296,6 +325,10 @@ impl App {
                 self.show_workspace_diff();
                 return Ok(false);
             }
+            "/git" | "/changes" => {
+                self.show_git_changes();
+                return Ok(false);
+            }
             "/checkpoints" => {
                 self.show_checkpoints();
                 return Ok(false);
@@ -309,6 +342,33 @@ impl App {
                 .map(str::trim)
                 .unwrap_or_default();
             self.create_checkpoint(label);
+            return Ok(false);
+        }
+
+        if input == "/stage" || input.starts_with("/stage ") {
+            let spec = input
+                .strip_prefix("/stage")
+                .map(str::trim)
+                .unwrap_or_default();
+            self.stage_paths(spec);
+            return Ok(false);
+        }
+
+        if input == "/unstage" || input.starts_with("/unstage ") {
+            let spec = input
+                .strip_prefix("/unstage")
+                .map(str::trim)
+                .unwrap_or_default();
+            self.unstage_paths(spec);
+            return Ok(false);
+        }
+
+        if input == "/commit" || input.starts_with("/commit ") {
+            let message = input
+                .strip_prefix("/commit")
+                .map(str::trim)
+                .unwrap_or_default();
+            self.commit_staged(message);
             return Ok(false);
         }
 
@@ -404,7 +464,7 @@ impl App {
                 self.session = Some(session);
                 match result {
                     Ok(()) => {
-                        self.status = "idle".to_string();
+                        self.status = "ready".to_string();
                         self.status_kind = StatusKind::Ok;
                     }
                     Err(error) => {
@@ -426,12 +486,14 @@ impl App {
         }
 
         self.last_turn_elapsed = self.busy_since.map(|started| started.elapsed());
+        self.last_reply_at = Some(Instant::now());
         self.busy_since = None;
         self.stream_phase = StreamPhase::Idle;
         self.turn_first_token_at = None;
         self.turn_token_chars = 0;
         self.stream_rx = None;
         self.stream_item_index = None;
+        self.pending_tool_approval = None;
         self.follow_tail = true;
         Ok(())
     }
@@ -456,8 +518,7 @@ impl App {
                 if self.turn_first_token_at.is_none() {
                     self.turn_first_token_at = Some(Instant::now());
                 }
-                self.turn_token_chars =
-                    self.turn_token_chars.saturating_add(delta.chars().count());
+                self.turn_token_chars = self.turn_token_chars.saturating_add(delta.chars().count());
                 self.stream_phase = derive_stream_phase(&self.transcript[index].body);
                 self.status = "streaming".to_string();
                 self.status_kind = StatusKind::Working;
@@ -472,6 +533,24 @@ impl App {
                 self.turn_first_token_at = None;
                 self.turn_token_chars = 0;
                 self.stream_phase = StreamPhase::Thinking;
+            }
+            TurnEvent::ToolApprovalRequested {
+                recipient,
+                summary,
+                response_tx,
+            } => {
+                self.pending_tool_approval = Some(PendingToolApproval {
+                    recipient,
+                    summary: summary.clone(),
+                    response_tx,
+                });
+                self.transcript.push(TranscriptItem::system(
+                    "Approval Required",
+                    format!("{summary}\nPress y to approve or n to reject."),
+                ));
+                self.status = "approval needed".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
             }
             TurnEvent::Message(message) => {
                 if message.role == Role::Assistant && message.channel == Some(Channel::Final) {
@@ -511,12 +590,69 @@ impl App {
     }
 
     fn input_height(&self) -> u16 {
-        if self.view == View::Chat && self.input.starts_with('/') {
+        if self.pending_tool_approval.is_some() {
+            2
+        } else if self.view == View::Chat && self.is_busy() {
+            2
+        } else if self.view == View::Chat && self.input.is_empty() {
+            1
+        } else if self.view == View::Chat && self.input.starts_with('/') {
             4
         } else if self.view == View::Chat && !self.path_suggestions.is_empty() {
             3 + self.path_suggestions.len().min(5) as u16
         } else {
             3
+        }
+    }
+
+    fn handle_approval_key(&mut self, code: KeyCode) -> bool {
+        let approve = match code {
+            KeyCode::Enter => Some(true),
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'y') => Some(true),
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => Some(false),
+            KeyCode::Esc => Some(false),
+            KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End => {
+                return false;
+            }
+            _ if self.pending_tool_approval.is_some() => {
+                self.status = "approve with y/Enter or reject with n/Esc".to_string();
+                self.status_kind = StatusKind::Warn;
+                return true;
+            }
+            _ => None,
+        };
+
+        let Some(approve) = approve else {
+            return false;
+        };
+        let Some(pending) = self.pending_tool_approval.take() else {
+            return false;
+        };
+
+        let summary = pending.summary.clone();
+        let _ = pending.response_tx.send(approve);
+        if approve {
+            self.append_system("Approved", format!("Allowed {summary}."));
+            self.status = "tool approved".to_string();
+            self.status_kind = StatusKind::Ok;
+        } else {
+            self.append_system("Rejected", format!("Blocked {summary}."));
+            self.status = "tool rejected".to_string();
+            self.status_kind = StatusKind::Warn;
+        }
+        true
+    }
+
+    fn header_height(&self) -> u16 {
+        if self.header_expanded || self.last_reply_at.is_none() {
+            4
+        } else {
+            1
         }
     }
 
@@ -577,6 +713,99 @@ impl App {
                 self.transcript
                     .push(TranscriptItem::error(format!("{error:#}")));
                 self.status = "diff failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn show_git_changes(&mut self) {
+        match workspace::changes_report(&self.config.harness.workspace) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Git Changes", report));
+                self.status = "git changes ready".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "git changes failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn stage_paths(&mut self, spec: &str) {
+        if self.is_busy() {
+            self.status = "wait for current turn before staging".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        }
+
+        match workspace::stage_paths(&self.config.harness.workspace, spec) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Git Stage", report));
+                self.status = "changes staged".to_string();
+                self.status_kind = StatusKind::Ok;
+                self.show_git_changes();
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "stage failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn unstage_paths(&mut self, spec: &str) {
+        if self.is_busy() {
+            self.status = "wait for current turn before unstaging".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        }
+
+        match workspace::unstage_paths(&self.config.harness.workspace, spec) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Git Unstage", report));
+                self.status = "changes unstaged".to_string();
+                self.status_kind = StatusKind::Ok;
+                self.show_git_changes();
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "unstage failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+        }
+        self.follow_tail = true;
+    }
+
+    fn commit_staged(&mut self, message: &str) {
+        if self.is_busy() {
+            self.status = "wait for current turn before committing".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        }
+
+        match workspace::commit_staged(&self.config.harness.workspace, message) {
+            Ok(report) => {
+                self.transcript
+                    .push(TranscriptItem::system("Git Commit", report));
+                self.status = "commit created".to_string();
+                self.status_kind = StatusKind::Ok;
+                self.show_git_changes();
+            }
+            Err(error) => {
+                self.transcript
+                    .push(TranscriptItem::error(format!("{error:#}")));
+                self.status = "commit failed".to_string();
                 self.status_kind = StatusKind::Error;
             }
         }
@@ -651,7 +880,10 @@ impl App {
         let field = SETTINGS[self.selected_setting];
         if matches!(
             field,
-            SettingField::AllowShell | SettingField::Stream | SettingField::ThinkingEffort
+            SettingField::AllowShell
+                | SettingField::EditApproval
+                | SettingField::Stream
+                | SettingField::ThinkingEffort
         ) {
             return self.toggle_setting();
         }
@@ -672,6 +904,9 @@ impl App {
         match field {
             SettingField::AllowShell => {
                 config.harness.allow_shell = !config.harness.allow_shell;
+            }
+            SettingField::EditApproval => {
+                config.harness.require_edit_approval = !config.harness.require_edit_approval;
             }
             SettingField::Stream => {
                 config.model.stream = !config.model.stream;

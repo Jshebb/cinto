@@ -32,6 +32,8 @@ pub struct ModelConfig {
 pub struct HarnessConfig {
     pub workspace: PathBuf,
     pub allow_shell: bool,
+    #[serde(default = "default_require_edit_approval")]
+    pub require_edit_approval: bool,
     #[serde(default = "default_max_tool_turns")]
     pub max_tool_turns: u32,
     pub system_prompt: String,
@@ -58,6 +60,7 @@ impl Default for Config {
             harness: HarnessConfig {
                 workspace,
                 allow_shell: false,
+                require_edit_approval: default_require_edit_approval(),
                 max_tool_turns: default_max_tool_turns(),
                 system_prompt: "You are Cinto, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace.".to_string(),
                 developer_prompt: "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <CINTO_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details.".to_string(),
@@ -115,6 +118,10 @@ fn default_max_tool_turns() -> u32 {
     16
 }
 
+fn default_require_edit_approval() -> bool {
+    true
+}
+
 fn default_thinking_effort() -> String {
     "medium".to_string()
 }
@@ -129,10 +136,8 @@ mod tests {
 
     #[test]
     fn saves_and_loads_config() {
-        let path = std::env::temp_dir().join(format!(
-            "cinto-config-test-{}.toml",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("cinto-config-test-{}.toml", std::process::id()));
         let mut config = Config::default();
         config.model.endpoint = "http://localhost:9000/v1/completions".to_string();
         config.model.api_key_env = Some("CINTO_TEST_KEY".to_string());

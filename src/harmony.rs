@@ -116,6 +116,16 @@ fn default_tools() -> Vec<ToolSpec> {
             schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
         },
         ToolCatalogEntry {
+            name: "functions.write_file",
+            description: "Create or replace a UTF-8 text file inside the workspace. The `path` must be relative and cannot escape the workspace. Parent directories are created when needed.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"contents":{"type":"string"}},"required":["path","content"],"additionalProperties":false}"#,
+        },
+        ToolCatalogEntry {
+            name: "functions.delete_file",
+            description: "Delete one file inside the workspace. The `path` must be relative, cannot escape the workspace, and must point to a regular file.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
+        },
+        ToolCatalogEntry {
             name: "functions.search",
             description: "Search the workspace with ripgrep and return matching lines with line numbers.",
             schema: r#"{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"}},"required":["query"],"additionalProperties":false}"#,

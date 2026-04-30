@@ -31,10 +31,12 @@ renderer/parser for servers that accept pre-tokenized prompts.
 
 ## Tool Policy
 
-Milestone 1 exposes read-only workspace tools:
+Milestone 1 exposes workspace tools:
 
 - `functions.list_files`
 - `functions.read_file`
+- `functions.write_file`
+- `functions.delete_file`
 - `functions.search`
 
 It also exposes in-memory task planning tools:
@@ -44,13 +46,16 @@ It also exposes in-memory task planning tools:
 
 The todo tools are deliberately not persisted yet. They give the model a
 structured way to create, display, and follow a detailed task list during a
-session without expanding the file mutation surface.
+session. `write_file` and `delete_file` are intentionally narrow: they only
+mutate regular files beneath the configured workspace. They require explicit TUI
+approval by default unless `harness.require_edit_approval` is disabled.
 
 Tool loops are capped by `harness.max_tool_turns`, which defaults to 16. Tool
 execution errors are returned to the model as tool output so the model can
 recover instead of crashing the UI turn.
 
-Milestone 2 should add write tools with a diff preview and a user approval step.
+Milestone 2 should add a diff preview and a user approval step around write
+tools.
 Milestone 3 can add shell commands with allowlists, working-directory controls,
 and visible stdout/stderr in the TUI.
 
@@ -58,6 +63,9 @@ and visible stdout/stderr in the TUI.
 
 The first safety features are local TUI commands, not model tools:
 
+- `/git` or `/changes` shows staged, unstaged, and untracked files.
+- `/stage <path|all>`, `/unstage <path|all>`, and `/commit <message>` cover
+  a small manual commit flow.
 - `/diff` shows git status, diff stat, and a bounded tracked diff.
 - `/checkpoint [label]` writes a patch snapshot under `.cinto/checkpoints`.
 - `/checkpoints` lists saved snapshots.

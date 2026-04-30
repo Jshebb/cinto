@@ -77,7 +77,7 @@ impl TranscriptItem {
                 let body = format_tool_call_body(short, &message.content);
                 Self {
                     role: TranscriptRole::Tool,
-                    title: format!("→ {short}"),
+                    title: format!("⚙ {short}"),
                     body,
                 }
             }
@@ -85,9 +85,10 @@ impl TranscriptItem {
                 let name = clean_recipient(recipient);
                 let short = strip_functions_prefix(&name);
                 let (title_suffix, body) = format_tool_result(short, &message.content);
+                let glyph = if is_tool_error(&body) { "✗" } else { "✓" };
                 Self {
                     role: TranscriptRole::Tool,
-                    title: format!("← {short}{title_suffix}"),
+                    title: format!("{glyph} {short}{title_suffix}"),
                     body,
                 }
             }
@@ -227,18 +228,33 @@ fn strip_functions_prefix(name: &str) -> &str {
 fn format_tool_call_body(tool: &str, raw_args: &str) -> String {
     let parsed: Option<Value> = serde_json::from_str(raw_args.trim()).ok();
     match (tool, parsed.as_ref()) {
-        ("read_file", Some(v)) => {
+        ("write_file", Some(v)) => {
             let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
-            format!("path  {path}")
+            let mut lines = vec![format_arg("path", &Value::String(path.to_string()))];
+            if let Some(content) = v
+                .get("content")
+                .or_else(|| v.get("contents"))
+                .and_then(Value::as_str)
+            {
+                lines.push(format_arg(
+                    "content",
+                    &Value::String(preview_multiline(content)),
+                ));
+            }
+            lines.join("\n")
         }
-        ("list_files", Some(v)) => {
+        ("read_file" | "list_files" | "delete_file", Some(v)) => {
             let path = v.get("path").and_then(Value::as_str).unwrap_or(".");
-            format!("path  {path}")
+            format_arg("path", &Value::String(path.to_string()))
         }
         ("search", Some(v)) => {
             let query = v.get("query").and_then(Value::as_str).unwrap_or("?");
             let path = v.get("path").and_then(Value::as_str).unwrap_or(".");
-            format!("query  \"{query}\"  in  {path}")
+            [
+                format_arg("query", &Value::String(query.to_string())),
+                format_arg("path", &Value::String(path.to_string())),
+            ]
+            .join("\n")
         }
         ("todo_write", Some(v)) => {
             let count = v
@@ -247,18 +263,14 @@ fn format_tool_call_body(tool: &str, raw_args: &str) -> String {
                 .map(|items| items.len())
                 .unwrap_or(0);
             let plural = if count == 1 { "item" } else { "items" };
-            format!("write  {count} {plural}")
+            format!("items:   {count} {plural}")
         }
         ("todo_read", _) => "read".to_string(),
-        _ => {
+        (_, Some(Value::Object(map))) => format_arg_map(map),
+        (_, Some(value)) => format_arg("value", value),
+        (_, None) => {
             let trimmed = raw_args.trim();
-            if trimmed.len() <= MAX_TOOL_CALL_DISPLAY_CHARS
-                && trimmed.lines().count() <= MAX_TOOL_CALL_DISPLAY_LINES
-            {
-                trimmed.to_string()
-            } else {
-                truncate_tool_body(trimmed, ToolPreviewKind::Call)
-            }
+            truncate_tool_body(trimmed, ToolPreviewKind::Call)
         }
     }
 }
@@ -270,7 +282,11 @@ fn format_tool_result(_tool: &str, raw: &str) -> (String, String) {
     let line_count = body.lines().count();
     let char_count = body.chars().count();
 
-    let stats = format!("  {} · {}", format_lines(line_count), humanize_size(char_count));
+    let stats = format!(
+        "  {} · {}",
+        format_lines(line_count),
+        humanize_size(char_count)
+    );
 
     if line_count <= MAX_TOOL_RESULT_DISPLAY_LINES && char_count <= MAX_TOOL_RESULT_DISPLAY_CHARS {
         return (stats, body.to_string());
@@ -278,6 +294,70 @@ fn format_tool_result(_tool: &str, raw: &str) -> (String, String) {
 
     let truncated = truncate_tool_body(body, ToolPreviewKind::Result);
     (format!("{stats}  · truncated"), truncated)
+}
+
+pub(super) fn is_tool_error(body: &str) -> bool {
+    let lower = body.trim_start().to_ascii_lowercase();
+    lower.starts_with("tool error:")
+        || lower.starts_with("unsupported tool:")
+        || lower.starts_with("tool blocked:")
+        || lower.contains("\nunsupported tool:")
+        || lower.contains("\ntool error:")
+        || lower.contains("\ntool blocked:")
+}
+
+fn format_arg_map(map: &serde_json::Map<String, Value>) -> String {
+    map.iter()
+        .map(|(key, value)| format_arg(key, value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_arg(key: &str, value: &Value) -> String {
+    const LABEL_WIDTH: usize = 8;
+    let rendered = match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Array(items) => {
+            if items.is_empty() {
+                "[]".to_string()
+            } else {
+                format!(
+                    "{} item{}",
+                    items.len(),
+                    if items.len() == 1 { "" } else { "s" }
+                )
+            }
+        }
+        Value::Object(fields) => {
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                format!(
+                    "{} field{}",
+                    fields.len(),
+                    if fields.len() == 1 { "" } else { "s" }
+                )
+            }
+        }
+    };
+    let rendered = truncate_tool_body(&rendered, ToolPreviewKind::Call);
+    let mut lines = rendered.lines();
+    let first = lines.next().unwrap_or_default();
+    let indent = " ".repeat(LABEL_WIDTH + 2);
+    let mut output = format!("{key:<width$}: {first}", width = LABEL_WIDTH);
+    for line in lines {
+        output.push('\n');
+        output.push_str(&indent);
+        output.push_str(line);
+    }
+    output
+}
+
+fn preview_multiline(value: &str) -> String {
+    truncate_tool_body(value.trim_end(), ToolPreviewKind::Call)
 }
 
 fn format_lines(count: usize) -> String {

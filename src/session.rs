@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
     config::Config,
@@ -42,10 +42,15 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TurnEvent {
     AssistantDelta(String),
     DiscardAssistantDraft,
+    ToolApprovalRequested {
+        recipient: String,
+        summary: String,
+        response_tx: oneshot::Sender<bool>,
+    },
     Message(Message),
 }
 
@@ -215,9 +220,17 @@ impl AgentSession {
                                 self.history.push(call.clone());
                                 let _ = event_tx.send(TurnEvent::Message(call));
 
-                                let output = self
-                                    .execute_tool(&recipient, &arguments)
-                                    .unwrap_or_else(|error| format!("tool error: {error:#}"));
+                                let approved = self.approve_tool_if_needed(
+                                    &recipient,
+                                    &arguments,
+                                    &event_tx,
+                                ).await;
+                                let output = if approved {
+                                    self.execute_tool(&recipient, &arguments)
+                                        .unwrap_or_else(|error| format!("tool error: {error:#}"))
+                                } else {
+                                    format!("tool blocked: user rejected {}", clean_recipient(&recipient))
+                                };
                                 let output = compact_tool_context(&recipient, &output);
                                 let tool = Message::tool(recipient, output);
                                 self.history.push(tool.clone());
@@ -249,14 +262,43 @@ impl AgentSession {
 
     fn execute_tool(&mut self, recipient: &str, arguments: &str) -> Result<String> {
         let recipient = clean_recipient(recipient);
-        match recipient.as_str() {
-            "functions.list_files" => self.list_files(arguments),
-            "functions.read_file" => self.read_file(arguments),
-            "functions.search" => self.search(arguments),
-            "functions.todo_read" => Ok(self.todo_details()),
-            "functions.todo_write" => self.todo_write(arguments),
+        let tool_name = recipient
+            .strip_prefix("functions.")
+            .unwrap_or(recipient.as_str());
+        match tool_name {
+            "list_files" => self.list_files(arguments),
+            "read_file" => self.read_file(arguments),
+            "write_file" => self.write_file(arguments),
+            "delete_file" => self.delete_file(arguments),
+            "search" => self.search(arguments),
+            "todo_read" => Ok(self.todo_details()),
+            "todo_write" => self.todo_write(arguments),
             _ => Ok(format!("unsupported tool: {recipient}")),
         }
+    }
+
+    async fn approve_tool_if_needed(
+        &self,
+        recipient: &str,
+        arguments: &str,
+        event_tx: &UnboundedSender<TurnEvent>,
+    ) -> bool {
+        if !self.config.harness.require_edit_approval || !is_mutating_tool(recipient) {
+            return true;
+        }
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = TurnEvent::ToolApprovalRequested {
+            recipient: clean_recipient(recipient),
+            summary: tool_approval_summary(recipient, arguments),
+            response_tx,
+        };
+
+        if event_tx.send(request).is_err() {
+            return false;
+        }
+
+        response_rx.await.unwrap_or(false)
     }
 
     fn list_files(&self, arguments: &str) -> Result<String> {
@@ -299,6 +341,57 @@ impl AgentSession {
         ))
     }
 
+    fn write_file(&self, arguments: &str) -> Result<String> {
+        let value = parse_json(arguments)?;
+        let path = value
+            .get("path")
+            .and_then(Value::as_str)
+            .context("write_file requires path")?;
+        let contents = value
+            .get("content")
+            .or_else(|| value.get("contents"))
+            .and_then(Value::as_str)
+            .context("write_file requires content")?;
+        let path = self.workspace_write_path(path)?;
+        let existed = path.exists();
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+
+        let action = if existed { "overwrote" } else { "created" };
+        Ok(format!(
+            "{action}: {}\nbytes: {}\nlines: {}",
+            path.display(),
+            contents.len(),
+            contents.lines().count()
+        ))
+    }
+
+    fn delete_file(&self, arguments: &str) -> Result<String> {
+        let value = parse_json(arguments)?;
+        let path = value
+            .get("path")
+            .and_then(Value::as_str)
+            .context("delete_file requires path")?;
+        let path = self.workspace_path(path)?;
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(anyhow!(
+                "delete_file only deletes regular files: {}",
+                path.display()
+            ));
+        }
+
+        fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+        Ok(format!("deleted: {}", path.display()))
+    }
+
     fn search(&self, arguments: &str) -> Result<String> {
         let value = parse_json(arguments)?;
         let query = value
@@ -336,6 +429,34 @@ impl AgentSession {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(format_todos(&self.todos))
+    }
+
+    fn workspace_write_path(&self, requested: &str) -> Result<PathBuf> {
+        let path = self.workspace_path(requested)?;
+        let workspace = self
+            .config
+            .harness
+            .workspace
+            .canonicalize()
+            .with_context(|| {
+                format!(
+                    "failed to resolve workspace {}",
+                    self.config.harness.workspace.display()
+                )
+            })?;
+
+        let parent = path
+            .parent()
+            .context("write_file path must include a file name")?;
+        let parent = nearest_existing_parent(parent)?;
+        let parent = parent
+            .canonicalize()
+            .with_context(|| format!("failed to resolve parent {}", parent.display()))?;
+        if !parent.starts_with(&workspace) {
+            return Err(anyhow!("path escapes workspace: {requested}"));
+        }
+
+        Ok(path)
     }
 
     fn workspace_path(&self, requested: &str) -> Result<PathBuf> {
@@ -380,8 +501,50 @@ impl AgentSession {
     }
 }
 
+fn nearest_existing_parent(path: &Path) -> Result<PathBuf> {
+    for parent in path.ancestors() {
+        if parent.exists() {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    Err(anyhow!(
+        "failed to find an existing parent for {}",
+        path.display()
+    ))
+}
+
 fn parse_json(arguments: &str) -> Result<Value> {
     serde_json::from_str(arguments.trim()).context("tool arguments must be JSON")
+}
+
+fn is_mutating_tool(recipient: &str) -> bool {
+    let recipient = clean_recipient(recipient);
+    let tool_name = recipient
+        .strip_prefix("functions.")
+        .unwrap_or(recipient.as_str());
+    matches!(tool_name, "write_file" | "delete_file")
+}
+
+fn tool_approval_summary(recipient: &str, arguments: &str) -> String {
+    let recipient = clean_recipient(recipient);
+    let tool_name = recipient
+        .strip_prefix("functions.")
+        .unwrap_or(recipient.as_str());
+    let path = serde_json::from_str::<Value>(arguments.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "?".to_string());
+
+    match tool_name {
+        "write_file" => format!("write file {path}"),
+        "delete_file" => format!("delete file {path}"),
+        _ => format!("run {recipient}"),
+    }
 }
 
 fn compact_tool_context(recipient: &str, output: &str) -> String {
@@ -546,4 +709,122 @@ fn clean_recipient(recipient: &str) -> String {
         .unwrap_or(recipient)
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_file_creates_nested_workspace_file() {
+        let workspace =
+            std::env::temp_dir().join(format!("cinto-write-file-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let mut session = AgentSession::new(config);
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let args = serde_json::json!({
+            "path": "src/bin/hello_world.rs",
+            "content": content,
+        })
+        .to_string();
+
+        let output = session
+            .execute_tool("functions.write_file", &args)
+            .expect("write file");
+        let written = workspace.join("src/bin/hello_world.rs");
+
+        assert!(output.contains("created:"));
+        assert_eq!(
+            fs::read_to_string(&written).expect("read written file"),
+            content
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn execute_tool_accepts_short_write_file_name() {
+        let workspace = std::env::temp_dir().join(format!(
+            "cinto-short-write-file-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let mut session = AgentSession::new(config);
+        let args = serde_json::json!({
+            "path": "short.rs",
+            "content": "fn main() {}\n",
+        })
+        .to_string();
+
+        let output = session
+            .execute_tool("write_file", &args)
+            .expect("write file with short name");
+
+        assert!(output.contains("created:"));
+        assert!(workspace.join("short.rs").exists());
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn delete_file_removes_workspace_file() {
+        let workspace =
+            std::env::temp_dir().join(format!("cinto-delete-file-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+        let target = workspace.join("hello.rs");
+        fs::write(&target, "fn main() {}\n").expect("write target");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let mut session = AgentSession::new(config);
+        let args = serde_json::json!({
+            "path": "hello.rs",
+        })
+        .to_string();
+
+        let output = session
+            .execute_tool("functions.delete_file", &args)
+            .expect("delete file");
+
+        assert!(output.contains("deleted:"));
+        assert!(!target.exists());
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn write_file_rejects_parent_traversal() {
+        let workspace = std::env::temp_dir().join(format!(
+            "cinto-write-file-traversal-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+
+        let mut config = Config::default();
+        config.harness.workspace = workspace.clone();
+        let mut session = AgentSession::new(config);
+        let args = serde_json::json!({
+            "path": "../escape.rs",
+            "content": "nope",
+        })
+        .to_string();
+
+        let error = session
+            .execute_tool("functions.write_file", &args)
+            .expect_err("parent traversal should fail");
+
+        assert!(error.to_string().contains("parent directory traversal"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
 }

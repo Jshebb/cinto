@@ -2,10 +2,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     App, StreamPhase, View,
@@ -15,7 +15,7 @@ use super::{
         tokens_per_second,
     },
     settings::SETTINGS,
-    transcript::{markdown_bold_spans, sanitize_stream_body, wrap_text},
+    transcript::{is_tool_error, markdown_bold_spans, sanitize_stream_body, wrap_text},
 };
 use crate::theme::{
     BRAND_NAME, BRAND_WORDMARK, PhaseGlyph, StatusKind, Theme, thinking_flavor, wave_frame,
@@ -23,10 +23,31 @@ use crate::theme::{
 
 impl App {
     pub(super) fn render_header(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
+        if area.is_empty() {
+            return;
+        }
+
         let view = match self.view {
             View::Chat => "chat",
             View::Settings => "settings",
         };
+        let model = short_model_name(&self.config.model.model);
+        if area.height == 1 {
+            let line = Paragraph::new(Line::from(vec![
+                Span::styled(BRAND_NAME, self.theme.buckle()),
+                Span::raw(" "),
+                Span::styled(BRAND_WORDMARK, self.theme.brand()),
+                Span::styled(format!(" · {model}"), Style::default().fg(self.theme.fg)),
+                Span::styled(
+                    format!(" · think:{}", self.config.model.thinking_effort),
+                    self.theme.dim_style(),
+                ),
+                Span::styled(format!(" · {view}"), self.theme.dim_style()),
+            ]));
+            frame.render_widget(line, area);
+            return;
+        }
+
         let endpoint = compact(
             &self.config.model.endpoint,
             area.width.saturating_sub(34) as usize,
@@ -46,7 +67,7 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("model ", self.theme.dim_style()),
-                Span::raw(self.config.model.model.as_str()),
+                Span::raw(model),
                 Span::styled("  think ", self.theme.dim_style()),
                 Span::raw(self.config.model.thinking_effort.as_str()),
                 Span::styled("  endpoint ", self.theme.dim_style()),
@@ -72,7 +93,7 @@ impl App {
     }
 
     pub(super) fn render_chat(&mut self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        let show_rail = area.width >= 88;
+        let show_rail = self.sidebar_visible && area.width >= 88;
         let (messages_area, rail_area) = if show_rail {
             let [messages_area, rail_area] = Layout::default()
                 .direction(Direction::Horizontal)
@@ -84,7 +105,7 @@ impl App {
         };
 
         let messages_inner = messages_area.inner(Margin {
-            vertical: 1,
+            vertical: 0,
             horizontal: 2,
         });
         let lines = self.transcript_lines(messages_inner.width);
@@ -199,6 +220,35 @@ impl App {
         }
 
         let working = self.is_busy();
+        if let Some(pending) = &self.pending_tool_approval {
+            let content = vec![
+                Line::from(vec![
+                    Span::styled("! approval ", self.theme.status_style(StatusKind::Warn)),
+                    Span::styled(
+                        format!("{} · {}", pending.recipient, pending.summary),
+                        Style::default().fg(self.theme.fg),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("y/Enter approve", self.theme.status_style(StatusKind::Ok)),
+                    Span::styled(" · ", self.theme.dim_style()),
+                    Span::styled("n/Esc reject", self.theme.status_style(StatusKind::Error)),
+                ]),
+            ];
+            frame.render_widget(Paragraph::new(content), area);
+            return;
+        }
+
+        if area.height == 1 && self.view == View::Chat && !working {
+            let input = Paragraph::new(Line::from(vec![
+                Span::styled("❯ ", self.theme.brand()),
+                Span::styled(self.input.clone(), Style::default().fg(self.theme.fg)),
+            ]));
+            frame.render_widget(input, area);
+            self.render_input_cursor(area, false, frame);
+            return;
+        }
+
         let (title, mut content, style) = match self.view {
             View::Chat if self.is_busy() => (
                 " Input ",
@@ -231,21 +281,8 @@ impl App {
             content.insert(0, self.phase_indicator_line());
         }
 
-        if area.height == 1 && self.view == View::Chat && !working {
-            if self.input.starts_with('/') {
-                content = vec![Line::styled(
-                    slash_command_tips(self.input.trim(), area.width),
-                    self.theme.dim_style(),
-                )];
-            } else if let Some(suggestion) = self.path_suggestions.first() {
-                content = vec![Line::styled(
-                    format!("complete: {suggestion}"),
-                    self.theme.dim_style(),
-                )];
-            }
-        }
-
-        let has_block = area.height >= 4 || !self.input.starts_with('/');
+        let has_block =
+            area.height > 1 && !working && (area.height >= 4 || !self.input.starts_with('/'));
         let mut input = Paragraph::new(content).style(style);
         if has_block {
             input = input.block(Block::default().title(title).borders(Borders::ALL));
@@ -258,56 +295,24 @@ impl App {
     }
 
     pub(super) fn render_footer(&self, area: Rect, frame: &mut ratatui::Frame<'_>) {
-        if area.height < 2 {
+        if area.height < 1 {
             return;
         }
 
-        let [token_area, status_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .areas(area);
-
         let ratio = token_ratio(self.estimated_tokens, self.config.model.context_window);
-        let label_text = format!(
-            "ctx {} / {}",
-            self.estimated_tokens, self.config.model.context_window
-        );
-        let label_width = (label_text.chars().count() as u16).saturating_add(2);
-        let [label_area, gauge_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(label_width), Constraint::Min(8)])
-            .areas(token_area);
-
         let token_kind = token_status_kind(ratio);
-        let label = Paragraph::new(Line::from(vec![
-            Span::styled("ctx ", self.theme.dim_style()),
-            Span::styled(
-                format!("{}", self.estimated_tokens),
-                self.theme.status_style(token_kind),
-            ),
-            Span::styled(
-                format!(" / {}", self.config.model.context_window),
-                self.theme.dim_style(),
-            ),
-            Span::raw(" "),
-        ]));
-        frame.render_widget(label, label_area);
+        let mut status_spans = vec![];
 
-        let gauge = Gauge::default()
-            .gauge_style(self.theme.status_style(token_kind))
-            .ratio(ratio)
-            .label(format!("{:.0}%", ratio * 100.0));
-        frame.render_widget(gauge, gauge_area);
-
-        let mut status_spans = vec![
-            Span::styled("Status ", self.theme.dim_style()),
-            Span::styled(
+        if self.pending_tool_approval.is_some() {
+            status_spans.push(Span::styled(
+                "awaiting approval",
+                self.theme.status_style(StatusKind::Warn),
+            ));
+        } else if self.is_busy() {
+            status_spans.push(Span::styled(
                 self.status.as_str(),
                 self.theme.status_style(self.status_kind),
-            ),
-        ];
-
-        if self.is_busy() {
+            ));
             if let Some(first) = self.turn_first_token_at {
                 if let Some(tps) = tokens_per_second(self.turn_token_chars, first.elapsed()) {
                     status_spans.push(Span::raw("   "));
@@ -317,14 +322,34 @@ impl App {
                     ));
                 }
             }
+        } else {
+            let last_reply = self
+                .last_reply_at
+                .map(|when| format_elapsed_short(when.elapsed()))
+                .unwrap_or_else(|| "-".to_string());
+            status_spans.push(Span::styled("▸ ready", self.theme.brand()));
+            status_spans.push(Span::styled(
+                format!(" · {last_reply} ago"),
+                self.theme.dim_style(),
+            ));
         }
 
-        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(" · ctx ", self.theme.dim_style()));
+        status_spans.extend(context_meter_spans(
+            &self.theme,
+            token_kind,
+            ratio,
+            self.estimated_tokens,
+            self.config.model.context_window,
+        ));
+        status_spans.push(Span::raw("  "));
         status_spans.push(Span::styled("Keys ", Style::default().fg(self.theme.muted)));
-        status_spans.push(Span::raw("Tab/F2 settings  PgUp/PgDn scroll  Ctrl-C quit"));
+        status_spans.push(Span::raw(
+            "F2 settings  F3 sidebar  F4 header  PgUp/PgDn scroll  Ctrl-C quit",
+        ));
 
         let status = Paragraph::new(Line::from(status_spans)).alignment(Alignment::Left);
-        frame.render_widget(status, status_area);
+        frame.render_widget(status, area);
     }
 
     fn phase_indicator_line(&self) -> Line<'static> {
@@ -335,55 +360,55 @@ impl App {
         let waiting_long = elapsed >= Duration::from_secs(10);
         let no_tokens_yet = self.turn_token_chars == 0;
 
-        let (glyph, label, glyph_style) = if no_tokens_yet
-            || matches!(self.stream_phase, StreamPhase::WarmingUp)
-        {
-            let text = if waiting_long {
-                "still thinking… (this is normal for local models)".to_string()
-            } else if self.turn_first_token_at.is_none() {
-                "warming up".to_string()
+        let (glyph, label, glyph_style) =
+            if no_tokens_yet || matches!(self.stream_phase, StreamPhase::WarmingUp) {
+                let text = if waiting_long {
+                    "still thinking… (this is normal for local models)".to_string()
+                } else if self.turn_first_token_at.is_none() {
+                    "warming up".to_string()
+                } else {
+                    "thinking".to_string()
+                };
+                (
+                    PhaseGlyph::Thinking,
+                    text,
+                    self.theme.phase_style(PhaseGlyph::Thinking),
+                )
             } else {
-                "thinking".to_string()
-            };
-            (
-                PhaseGlyph::Thinking,
-                text,
-                self.theme.phase_style(PhaseGlyph::Thinking),
-            )
-        } else {
-            match &self.stream_phase {
-                StreamPhase::Thinking => (
-                    PhaseGlyph::Thinking,
-                    "thinking".to_string(),
-                    self.theme.phase_style(PhaseGlyph::Thinking),
-                ),
-                StreamPhase::CallingTool(name) => {
-                    let action = match name.as_str() {
-                        "read_file" => "reading file",
-                        "list_files" => "listing files",
-                        "search" => "searching",
-                        "todo_write" => "writing todos",
-                        "todo_read" => "reading todos",
-                        _ => "calling tool",
-                    };
-                    (
-                        PhaseGlyph::Tool,
-                        format!("{action} · {name}"),
-                        self.theme.phase_style(PhaseGlyph::Tool),
-                    )
+                match &self.stream_phase {
+                    StreamPhase::Thinking => (
+                        PhaseGlyph::Thinking,
+                        "thinking".to_string(),
+                        self.theme.phase_style(PhaseGlyph::Thinking),
+                    ),
+                    StreamPhase::CallingTool(name) => {
+                        let action = match name.as_str() {
+                            "read_file" => "reading file",
+                            "write_file" => "writing file",
+                            "list_files" => "listing files",
+                            "search" => "searching",
+                            "todo_write" => "writing todos",
+                            "todo_read" => "reading todos",
+                            _ => "calling tool",
+                        };
+                        (
+                            PhaseGlyph::Tool,
+                            format!("{action} · {name}"),
+                            self.theme.phase_style(PhaseGlyph::Tool),
+                        )
+                    }
+                    StreamPhase::Responding => (
+                        PhaseGlyph::Responding,
+                        "responding".to_string(),
+                        self.theme.phase_style(PhaseGlyph::Responding),
+                    ),
+                    StreamPhase::Idle | StreamPhase::WarmingUp => (
+                        PhaseGlyph::Thinking,
+                        "thinking".to_string(),
+                        self.theme.phase_style(PhaseGlyph::Thinking),
+                    ),
                 }
-                StreamPhase::Responding => (
-                    PhaseGlyph::Responding,
-                    "responding".to_string(),
-                    self.theme.phase_style(PhaseGlyph::Responding),
-                ),
-                StreamPhase::Idle | StreamPhase::WarmingUp => (
-                    PhaseGlyph::Thinking,
-                    "thinking".to_string(),
-                    self.theme.phase_style(PhaseGlyph::Thinking),
-                ),
-            }
-        };
+            };
 
         let mut spans = vec![
             Span::styled(format!("{} ", glyph.as_str()), glyph_style),
@@ -423,16 +448,6 @@ impl App {
         for (index, item) in self.transcript.iter().enumerate() {
             let role = item.role.label();
             let style = item.role.style(&self.theme);
-            let is_tool = item.role == TranscriptRole::Tool;
-            let rail = if is_tool { "│ " } else { "" };
-            let rail_style = self.theme.dim_style();
-            let inner_width = width.saturating_sub(rail.chars().count() as u16);
-
-            lines.push(Line::from(vec![
-                Span::styled(role, style),
-                Span::styled(format!(" {}", item.title), self.theme.dim_style()),
-            ]));
-
             let is_streaming = self.stream_item_index == Some(index);
             let is_diff = item.role == TranscriptRole::System && item.title == "Workspace Diff";
             let body_owned;
@@ -443,31 +458,39 @@ impl App {
                 &item.body
             };
 
-            for line in body_ref.lines() {
-                if line.is_empty() {
-                    if is_tool {
-                        lines.push(Line::from(vec![Span::styled(rail, rail_style)]));
-                    } else {
+            if item.role == TranscriptRole::Tool {
+                lines.extend(tool_panel_lines(&self.theme, &item.title, body_ref, width));
+                lines.push(Line::raw(""));
+                continue;
+            }
+
+            lines.push(Line::from(vec![
+                Span::styled(role, style),
+                Span::styled(format!(" {}", item.title), self.theme.dim_style()),
+            ]));
+
+            if is_streaming {
+                lines.push(stream_header_line(
+                    &self.theme,
+                    &self.stream_phase,
+                    self.turn_token_chars,
+                    self.turn_first_token_at,
+                ));
+            }
+
+            if is_diff {
+                for line in body_ref.lines() {
+                    if line.is_empty() {
                         lines.push(Line::raw(""));
-                    }
-                } else if is_diff {
-                    let style = diff_line_style(line, &self.theme);
-                    for wrapped in wrap_text(line, inner_width) {
-                        lines.push(Line::from(Span::styled(wrapped, style)));
-                    }
-                } else {
-                    for wrapped in wrap_text(line, inner_width) {
-                        let mut spans = Vec::new();
-                        if is_tool {
-                            spans.push(Span::styled(rail, rail_style));
+                    } else {
+                        let style = diff_line_style(line, &self.theme);
+                        for wrapped in wrap_text(line, width) {
+                            lines.push(Line::from(Span::styled(wrapped, style)));
                         }
-                        spans.extend(markdown_bold_spans(
-                            &wrapped,
-                            Style::default().fg(self.theme.fg),
-                        ));
-                        lines.push(Line::from(spans));
                     }
                 }
+            } else {
+                lines.extend(markdown_body_lines(&self.theme, body_ref, width));
             }
             lines.push(Line::raw(""));
         }
@@ -479,30 +502,39 @@ impl App {
     }
 
     fn context_rail_lines(&self, visible_height: u16) -> Vec<Line<'static>> {
-        let auth = self
-            .config
-            .model
-            .api_key_env
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("none");
         let elapsed = self
             .busy_since
             .map(|started| started.elapsed())
             .or(self.last_turn_elapsed)
             .map(format_duration)
             .unwrap_or_else(|| "-".to_string());
-        let state = if self.is_busy() { "running" } else { "ready" };
+        let (state, state_style) = if self.pending_tool_approval.is_some() {
+            (
+                "awaiting approval",
+                self.theme.status_style(StatusKind::Warn),
+            )
+        } else if self.is_busy() {
+            ("running", self.theme.status_style(StatusKind::Working))
+        } else {
+            ("ready", Style::default().fg(self.theme.fg))
+        };
+        let edit_mode = if self.config.harness.require_edit_approval {
+            "approval"
+        } else {
+            "unlocked"
+        };
 
         let mut lines = vec![
             Line::from(vec![
                 Span::styled(BRAND_NAME, self.theme.buckle()),
                 Span::raw(" "),
-                Span::styled(BRAND_WORDMARK, self.theme.brand()),
+                Span::styled("Session", self.theme.brand()),
             ]),
-            Line::raw(""),
-            Line::styled("Session", self.theme.brand()),
-            Line::raw(format!("state: {state}  elapsed: {elapsed}")),
+            Line::from(vec![
+                Span::styled("state: ", self.theme.dim_style()),
+                Span::styled(state, state_style),
+                Span::styled(format!("  elapsed: {elapsed}"), self.theme.dim_style()),
+            ]),
             Line::raw(format!("effort: {}", self.config.model.thinking_effort)),
             Line::raw(format!(
                 "messages: {}  todos: {}",
@@ -513,26 +545,16 @@ impl App {
                 self.estimated_tokens, self.config.model.context_window
             )),
             Line::raw(format!("tools: {}", self.config.harness.max_tool_turns)),
-            Line::raw(""),
-            Line::styled("Model", self.theme.brand()),
-            Line::raw(compact(&self.config.model.model, 18)),
-            Line::raw(format!(
-                "out: {}  temp: {:.2}",
-                self.config.model.max_tokens, self.config.model.temperature
-            )),
-            Line::raw(format!(
-                "stream: {}  auth: {auth}",
-                self.config.model.stream
-            )),
+            Line::raw(format!("edits: {edit_mode}")),
         ];
 
         if visible_height as usize >= lines.len() + 5 {
             lines.extend([
                 Line::raw(""),
                 Line::styled("Commands", self.theme.brand()),
-                Line::raw("/settings  /prompt"),
-                Line::raw("/tools     /todos"),
-                Line::raw("/diff      /checkpoint"),
+                Line::raw("/git      /diff"),
+                Line::raw("/stage    /unstage"),
+                Line::raw("/commit   /checkpoint"),
                 Line::raw("/clear     /quit"),
             ]);
         }
@@ -573,6 +595,8 @@ impl App {
 
         let (x_offset, y_offset, width) = if has_block {
             (1, 1, area.width.saturating_sub(2))
+        } else if self.view == View::Chat {
+            (2, 0, area.width.saturating_sub(2))
         } else {
             (0, 0, area.width)
         };
@@ -615,6 +639,450 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
     } else {
         Style::default().fg(theme.fg)
     }
+}
+
+fn short_model_name(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(model)
+        .to_string()
+}
+
+fn context_meter_spans(
+    theme: &Theme,
+    token_kind: StatusKind,
+    ratio: f64,
+    tokens: usize,
+    context_window: u32,
+) -> Vec<Span<'static>> {
+    const WIDTH: usize = 10;
+    let filled = ((ratio * WIDTH as f64).round() as usize).min(WIDTH);
+    let empty = WIDTH.saturating_sub(filled);
+
+    vec![
+        Span::styled("[", theme.chrome_style()),
+        Span::styled("█".repeat(filled), theme.status_style(token_kind)),
+        Span::styled("░".repeat(empty), theme.chrome_style()),
+        Span::styled("] ", theme.chrome_style()),
+        Span::styled(format!("{tokens}"), theme.status_style(token_kind)),
+        Span::styled(format!("/{context_window}"), theme.dim_style()),
+        Span::styled(format!(" ({:.0}%)", ratio * 100.0), theme.dim_style()),
+    ]
+}
+
+fn markdown_body_lines(theme: &Theme, body: &str, width: u16) -> Vec<Line<'static>> {
+    let mut rendered = Vec::new();
+    let mut fence: Option<MarkdownFence> = None;
+
+    for raw in body.lines() {
+        if let Some(lang) = fence_marker(raw) {
+            if let Some(open) = fence.take() {
+                rendered.extend(fenced_block_lines(theme, &open.lang, &open.lines, width));
+            } else {
+                fence = Some(MarkdownFence {
+                    lang,
+                    lines: Vec::new(),
+                });
+            }
+            continue;
+        }
+
+        if let Some(open) = fence.as_mut() {
+            open.lines.push(raw.to_string());
+            continue;
+        }
+
+        if raw.is_empty() {
+            rendered.push(Line::raw(""));
+        } else {
+            for wrapped in wrap_text(raw, width) {
+                rendered.push(Line::from(markdown_bold_spans(
+                    &wrapped,
+                    Style::default().fg(theme.fg),
+                )));
+            }
+        }
+    }
+
+    if let Some(open) = fence {
+        rendered.extend(fenced_block_lines(theme, &open.lang, &open.lines, width));
+    }
+
+    rendered
+}
+
+#[derive(Debug)]
+struct MarkdownFence {
+    lang: String,
+    lines: Vec<String>,
+}
+
+fn fence_marker(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("```")?;
+    Some(
+        rest.trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+fn fenced_block_lines(
+    theme: &Theme,
+    lang: &str,
+    content: &[String],
+    width: u16,
+) -> Vec<Line<'static>> {
+    let kind = FenceKind::from_lang(lang);
+    let panel_width = (width as usize).max(22);
+    let inner_width = panel_width.max(12);
+    let title = match kind {
+        FenceKind::Terminal => {
+            let label = if lang.trim().is_empty() {
+                "bash"
+            } else {
+                lang.trim()
+            };
+            format!("$ {label}")
+        }
+        FenceKind::Code => {
+            let label = if lang.trim().is_empty() {
+                "code"
+            } else {
+                lang.trim()
+            };
+            format!("<> {label}")
+        }
+    };
+    let title = compact(&title, inner_width.saturating_sub(2));
+    let title_len = title.chars().count();
+    let title_style = match kind {
+        FenceKind::Terminal => theme.status_style(StatusKind::Working),
+        FenceKind::Code => theme.brand(),
+    };
+    let border = theme.chrome_style();
+    let top_fill = "─".repeat(panel_width.saturating_sub(title_len + 3));
+    let mut lines = vec![Line::from(vec![
+        Span::styled("─ ", border),
+        Span::styled(title, title_style),
+        Span::styled(format!(" {top_fill}"), border),
+    ])];
+
+    match kind {
+        FenceKind::Terminal => lines.extend(terminal_block_body(theme, content, inner_width)),
+        FenceKind::Code => lines.extend(code_block_body(theme, lang, content, inner_width)),
+    }
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FenceKind {
+    Code,
+    Terminal,
+}
+
+impl FenceKind {
+    fn from_lang(lang: &str) -> Self {
+        match lang.trim().to_ascii_lowercase().as_str() {
+            "bash" | "sh" | "shell" | "zsh" | "fish" | "console" | "terminal" => Self::Terminal,
+            _ => Self::Code,
+        }
+    }
+}
+
+fn terminal_block_body(
+    theme: &Theme,
+    content: &[String],
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    if content.is_empty() {
+        return vec![Line::raw("")];
+    }
+
+    let command_width = inner_width.saturating_sub(2).max(1);
+    let mut lines = Vec::new();
+    for raw in content {
+        if raw.is_empty() {
+            lines.push(Line::raw(""));
+            continue;
+        }
+
+        for chunk in hard_wrap_preserving(raw, command_width) {
+            let mut spans = vec![Span::styled("$ ", theme.brand())];
+            spans.extend(shell_spans(theme, &chunk));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+fn code_block_body(
+    theme: &Theme,
+    lang: &str,
+    content: &[String],
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    if content.is_empty() {
+        return vec![Line::raw("")];
+    }
+
+    let gutter_width = content.len().to_string().len().max(2);
+    let code_width = inner_width.saturating_sub(gutter_width + 3).max(1);
+    let mut lines = Vec::new();
+    for (index, raw) in content.iter().enumerate() {
+        let chunks = hard_wrap_preserving(raw, code_width);
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            let gutter = if chunk_index == 0 {
+                format!("{:>width$} │ ", index + 1, width = gutter_width)
+            } else {
+                format!("{:>width$} │ ", "", width = gutter_width)
+            };
+            let mut spans = vec![Span::styled(gutter, theme.dim_style())];
+            spans.extend(code_spans(theme, lang, chunk));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+fn code_spans(theme: &Theme, lang: &str, text: &str) -> Vec<Span<'static>> {
+    if lang.trim().eq_ignore_ascii_case("rust") {
+        return rust_spans(theme, text);
+    }
+
+    vec![Span::styled(
+        text.to_string(),
+        Style::default().fg(theme.fg),
+    )]
+}
+
+fn rust_spans(theme: &Theme, text: &str) -> Vec<Span<'static>> {
+    if let Some(comment_start) = text.find("//") {
+        let mut spans = rust_spans(theme, &text[..comment_start]);
+        spans.push(Span::styled(
+            text[comment_start..].to_string(),
+            theme.dim_style(),
+        ));
+        return spans;
+    }
+
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        let before = &rest[..start];
+        spans.extend(rust_plain_spans(theme, before));
+        let after_start = &rest[start + 1..];
+        if let Some(end) = after_start.find('"') {
+            let literal = &rest[start..start + end + 2];
+            spans.push(Span::styled(
+                literal.to_string(),
+                Style::default().fg(theme.success),
+            ));
+            rest = &after_start[end + 1..];
+        } else {
+            spans.push(Span::styled(
+                rest[start..].to_string(),
+                Style::default().fg(theme.success),
+            ));
+            return spans;
+        }
+    }
+    spans.extend(rust_plain_spans(theme, rest));
+    spans
+}
+
+fn rust_plain_spans(theme: &Theme, text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut token = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+        } else {
+            if !token.is_empty() {
+                spans.push(rust_token_span(theme, &token));
+                token.clear();
+            }
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(theme.fg)));
+        }
+    }
+
+    if !token.is_empty() {
+        spans.push(rust_token_span(theme, &token));
+    }
+
+    spans
+}
+
+fn rust_token_span(theme: &Theme, token: &str) -> Span<'static> {
+    let style = match token {
+        "as" | "async" | "await" | "const" | "crate" | "dyn" | "else" | "enum" | "extern"
+        | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match" | "mod"
+        | "move" | "mut" | "pub" | "ref" | "return" | "self" | "Self" | "static" | "struct"
+        | "super" | "trait" | "true" | "type" | "unsafe" | "use" | "where" | "while" => {
+            theme.brand()
+        }
+        "String" | "Vec" | "Option" | "Result" | "Some" | "None" | "Ok" | "Err" => {
+            theme.brand_subtle()
+        }
+        _ => Style::default().fg(theme.fg),
+    };
+    Span::styled(token.to_string(), style)
+}
+
+fn shell_spans(theme: &Theme, text: &str) -> Vec<Span<'static>> {
+    let mut parts = text.splitn(2, char::is_whitespace);
+    let command = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default();
+    let mut spans = Vec::new();
+
+    if !command.is_empty() {
+        spans.push(Span::styled(
+            command.to_string(),
+            theme.status_style(StatusKind::Working),
+        ));
+    }
+    if !rest.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            rest.to_string(),
+            Style::default().fg(theme.fg),
+        ));
+    }
+
+    spans
+}
+
+fn stream_header_line(
+    theme: &Theme,
+    phase: &StreamPhase,
+    token_chars: usize,
+    first_token_at: Option<Instant>,
+) -> Line<'static> {
+    let channel = match phase {
+        StreamPhase::Responding => "final",
+        StreamPhase::CallingTool(_) => "commentary",
+        StreamPhase::Idle | StreamPhase::WarmingUp | StreamPhase::Thinking => "analysis",
+    };
+    let tokens = token_chars / 4;
+    let speed = first_token_at
+        .and_then(|first| tokens_per_second(token_chars, first.elapsed()))
+        .map(|tps| format!(" · {tps:.0} tok/s"))
+        .unwrap_or_default();
+
+    Line::from(vec![
+        Span::styled("─── ", theme.chrome_style()),
+        Span::styled(channel, theme.brand()),
+        Span::styled(format!(" · {tokens} tokens{speed} "), theme.dim_style()),
+        Span::styled("───", theme.chrome_style()),
+    ])
+}
+
+fn tool_panel_lines(theme: &Theme, title: &str, body: &str, width: u16) -> Vec<Line<'static>> {
+    let panel_width = (width as usize).max(18);
+    let inner_width = panel_width.saturating_sub(4).max(10);
+    let error = title.starts_with('✗') || is_tool_error(body);
+    let title = compact(title, inner_width.saturating_sub(2));
+    let title_len = title.chars().count();
+    let title_style = if error {
+        theme.status_style(StatusKind::Error)
+    } else if title.starts_with('✓') {
+        theme.status_style(StatusKind::Ok)
+    } else {
+        theme.brand()
+    };
+    let border = theme.chrome_style();
+    let top_fill = "─".repeat(panel_width.saturating_sub(title_len + 5));
+    let mut lines = vec![Line::from(vec![
+        Span::styled("╭─ ", border),
+        Span::styled(title, title_style),
+        Span::styled(format!(" {top_fill}╮"), border),
+    ])];
+
+    if body.trim().is_empty() {
+        lines.push(tool_panel_body_line(theme, "", inner_width, error));
+    } else {
+        for raw in body.lines() {
+            for chunk in hard_wrap_preserving(raw, inner_width) {
+                lines.push(tool_panel_body_line(theme, &chunk, inner_width, error));
+            }
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("╰{}╯", "─".repeat(panel_width.saturating_sub(2))),
+        border,
+    )));
+    lines
+}
+
+fn tool_panel_body_line(
+    theme: &Theme,
+    text: &str,
+    inner_width: usize,
+    error: bool,
+) -> Line<'static> {
+    let text_len = text.chars().count().min(inner_width);
+    let mut spans = vec![Span::styled("│ ", theme.chrome_style())];
+    spans.extend(tool_body_spans(theme, text, error));
+    spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(text_len))));
+    spans.push(Span::styled(" │", theme.chrome_style()));
+    Line::from(spans)
+}
+
+fn tool_body_spans(theme: &Theme, text: &str, error: bool) -> Vec<Span<'static>> {
+    if error {
+        return vec![Span::styled(
+            text.to_string(),
+            theme.status_style(StatusKind::Error),
+        )];
+    }
+
+    let Some((label, value)) = text.split_once(':') else {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.fg),
+        )];
+    };
+
+    if label.trim().is_empty() {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.fg),
+        )];
+    }
+
+    let value_style = match label.trim() {
+        "path" => theme.brand_subtle(),
+        "query" => theme.status_style(StatusKind::Working),
+        "content" => Style::default().fg(theme.fg),
+        _ => Style::default().fg(theme.fg),
+    };
+
+    vec![
+        Span::styled(format!("{label}:"), theme.brand()),
+        Span::styled(value.to_string(), value_style),
+    ]
+}
+
+fn hard_wrap_preserving(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+
+    chars
+        .chunks(width)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
 }
 
 fn selected_scroll_offset(selected: usize, visible_height: u16) -> u16 {

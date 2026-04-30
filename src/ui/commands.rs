@@ -1,8 +1,13 @@
-pub(super) const COMMAND_TIPS: [(&str, &str); 9] = [
+pub(super) const COMMAND_TIPS: [(&str, &str); 14] = [
     ("/settings", "open API settings"),
     ("/prompt", "show Harmony prompt"),
     ("/tools", "list agent tools"),
     ("/todos", "show current todo list"),
+    ("/git", "show git changes"),
+    ("/changes", "show git changes"),
+    ("/stage", "stage paths"),
+    ("/unstage", "unstage paths"),
+    ("/commit", "commit staged changes"),
     ("/diff", "show workspace diff"),
     ("/checkpoint", "save a patch checkpoint"),
     ("/checkpoints", "list patch checkpoints"),

@@ -96,6 +96,10 @@ workspace and skip `.git`, `.cinto`, and `target`.
 
 ## Safety Commands
 
+- `/git` or `/changes`: show staged, unstaged, and untracked files
+- `/stage <path|all>`: stage one or more paths, or all changes
+- `/unstage <path|all>`: unstage one or more paths, or all staged changes
+- `/commit <message>`: commit currently staged changes
 - `/diff`: show git status, diff stat, and a truncated tracked diff
 - `/checkpoint [label]`: save the current tracked diff plus status as a patch snapshot
 - `/checkpoints`: list saved checkpoint patch files
@@ -105,10 +109,12 @@ the workspace so you can inspect them before applying anything manually.
 
 ## Current Scope
 
-The implemented workspace tools are read-only:
+The implemented workspace tools are:
 
 - `functions.list_files`
 - `functions.read_file`
+- `functions.write_file`
+- `functions.delete_file`
 - `functions.search`
 
 The agent can also maintain in-memory task state:
@@ -116,9 +122,12 @@ The agent can also maintain in-memory task state:
 - `functions.todo_read`
 - `functions.todo_write`
 
-Editing and shell execution are deliberately gated for a later milestone so the
-harness can grow an explicit approval flow instead of mutating a workspace
-silently.
+`write_file` creates or replaces UTF-8 files beneath the configured workspace,
+and `delete_file` removes a single regular file. File edits require an explicit
+TUI approval by default; toggle `edit approval` in settings to unlock direct
+model edits.
+Shell execution is deliberately gated for a later milestone so the harness can
+grow an explicit approval flow for commands.
 
 Large tool calls and tool results render as compact transcript previews with
 size metadata plus first/last snippets. The session still keeps the full tool

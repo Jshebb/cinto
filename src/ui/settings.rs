@@ -17,10 +17,11 @@ pub(super) enum SettingField {
     ToolTurns,
     Stop,
     Workspace,
+    EditApproval,
     AllowShell,
 }
 
-pub(super) const SETTINGS: [SettingField; 12] = [
+pub(super) const SETTINGS: [SettingField; 13] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::ApiKeyEnv,
@@ -32,6 +33,7 @@ pub(super) const SETTINGS: [SettingField; 12] = [
     SettingField::ToolTurns,
     SettingField::Stop,
     SettingField::Workspace,
+    SettingField::EditApproval,
     SettingField::AllowShell,
 ];
 
@@ -51,6 +53,7 @@ impl SettingField {
             SettingField::ToolTurns => "tool turns",
             SettingField::Stop => "stop",
             SettingField::Workspace => "workspace",
+            SettingField::EditApproval => "edit approval",
             SettingField::AllowShell => "allow shell",
         }
     }
@@ -68,6 +71,7 @@ impl SettingField {
             SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
             SettingField::Stop => config.model.stop.join(","),
             SettingField::Workspace => config.harness.workspace.display().to_string(),
+            SettingField::EditApproval => config.harness.require_edit_approval.to_string(),
             SettingField::AllowShell => config.harness.allow_shell.to_string(),
         }
     }
@@ -118,6 +122,12 @@ impl SettingField {
             }
             SettingField::Workspace => {
                 config.harness.workspace = PathBuf::from(non_empty(value, "workspace")?);
+            }
+            SettingField::EditApproval => {
+                config.harness.require_edit_approval = value
+                    .trim()
+                    .parse()
+                    .context("edit approval must be true or false")?;
             }
             SettingField::AllowShell => {
                 config.harness.allow_shell = value

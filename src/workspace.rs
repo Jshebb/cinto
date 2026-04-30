@@ -27,6 +27,94 @@ pub fn diff_report(workspace: &Path) -> Result<String> {
     ))
 }
 
+pub fn changes_report(workspace: &Path) -> Result<String> {
+    ensure_git_workspace(workspace)?;
+
+    let status = git_output(workspace, &["status", "--porcelain=v1"])?;
+    if status.trim().is_empty() {
+        return Ok("Git changes\n\nWorkspace is clean.".to_string());
+    }
+
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+    let mut untracked = Vec::new();
+
+    for line in status.lines() {
+        let mut chars = line.chars();
+        let index = chars.next().unwrap_or(' ');
+        let worktree = chars.next().unwrap_or(' ');
+        let path = line.get(3..).unwrap_or("").trim();
+
+        if index == '?' && worktree == '?' {
+            untracked.push(path.to_string());
+            continue;
+        }
+        if index != ' ' {
+            staged.push(format!("{index}  {path}"));
+        }
+        if worktree != ' ' {
+            unstaged.push(format!("{worktree}  {path}"));
+        }
+    }
+
+    let cached_stat = empty_as(
+        &git_output(workspace, &["diff", "--stat", "--cached"])?,
+        "no staged diff",
+    );
+    let unstaged_stat = empty_as(
+        &git_output(workspace, &["diff", "--stat"])?,
+        "no unstaged tracked diff",
+    );
+
+    Ok(format!(
+        "Git changes\n\n**Staged**\n{}\n\n**Unstaged**\n{}\n\n**Untracked**\n{}\n\n**Staged Stat**\n{}\n\n**Unstaged Stat**\n{}\n\nCommands: `/stage <path|all>`, `/unstage <path|all>`, `/commit <message>`",
+        format_change_list(&staged, "none"),
+        format_change_list(&unstaged, "none"),
+        format_change_list(&untracked, "none"),
+        cached_stat,
+        unstaged_stat,
+    ))
+}
+
+pub fn stage_paths(workspace: &Path, spec: &str) -> Result<String> {
+    ensure_git_workspace(workspace)?;
+    let paths = parse_path_args(spec)?;
+    if is_all_paths(&paths) {
+        git_output(workspace, &["add", "--all"])?;
+        return Ok("Staged all changes.".to_string());
+    }
+
+    let mut args = vec!["add", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git_output(workspace, &args)?;
+    Ok(format!("Staged {}.", paths.join(", ")))
+}
+
+pub fn unstage_paths(workspace: &Path, spec: &str) -> Result<String> {
+    ensure_git_workspace(workspace)?;
+    let paths = parse_path_args(spec)?;
+    if is_all_paths(&paths) {
+        git_output(workspace, &["restore", "--staged", "--", "."])?;
+        return Ok("Unstaged all changes.".to_string());
+    }
+
+    let mut args = vec!["restore", "--staged", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git_output(workspace, &args)?;
+    Ok(format!("Unstaged {}.", paths.join(", ")))
+}
+
+pub fn commit_staged(workspace: &Path, message: &str) -> Result<String> {
+    ensure_git_workspace(workspace)?;
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(anyhow!("commit message cannot be empty"));
+    }
+
+    let output = git_output(workspace, &["commit", "-m", message])?;
+    Ok(format!("Commit created\n\n{output}"))
+}
+
 pub fn create_checkpoint(workspace: &Path, label: Option<&str>) -> Result<String> {
     ensure_git_workspace(workspace)?;
 
@@ -229,6 +317,37 @@ fn collect_path_suggestions(
 
 fn should_skip_entry(name: &str) -> bool {
     matches!(name, ".git" | ".cinto" | "target")
+}
+
+fn format_change_list(items: &[String], empty: &str) -> String {
+    if items.is_empty() {
+        return empty.to_string();
+    }
+
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_path_args(spec: &str) -> Result<Vec<String>> {
+    let paths = spec
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if paths.is_empty() {
+        return Err(anyhow!("expected a path or `all`"));
+    }
+
+    Ok(paths)
+}
+
+fn is_all_paths(paths: &[String]) -> bool {
+    paths.len() == 1 && matches!(paths[0].as_str(), "all" | ".")
 }
 
 fn sanitize_label(label: &str) -> String {
