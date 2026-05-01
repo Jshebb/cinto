@@ -71,8 +71,8 @@ automaticamente no seu `PATH` de usuário.
 Depois da publicação dos pacotes npm:
 
 ```sh
-npm install -g cinto
-npx cinto
+npm install -g @cinto/cli
+npx @cinto/cli
 ```
 
 O pacote `cinto` é um launcher pequeno que depende do pacote opcional da sua

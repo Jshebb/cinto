@@ -74,8 +74,8 @@ This downloads and extracts the latest Windows release to `~\.local\bin` and aut
 After the npm packages are published:
 
 ```sh
-npm install -g cinto
-npx cinto
+npm install -g @cinto/cli
+npx @cinto/cli
 ```
 
 The npm package is a small launcher that depends on the matching optional
