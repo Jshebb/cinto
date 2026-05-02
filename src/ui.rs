@@ -36,9 +36,11 @@ mod transcript;
 
 use self::{
     layout::app_areas,
-    settings::{SETTINGS, SettingField, next_format, next_thinking_effort},
+    settings::{
+        SETTINGS, SettingField, next_format, next_reasoning_protocol, next_thinking_effort,
+    },
     setup::SetupPreset,
-    transcript::TranscriptItem,
+    transcript::{TranscriptItem, sanitize_stream_body},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub(crate) enum StreamPhase {
     Idle,
     WarmingUp,
     Thinking,
+    CrpSlot(String),
     CallingTool(String),
     Responding,
 }
@@ -311,7 +314,7 @@ impl App {
             "/prompt" => {
                 if let Some(session) = &self.session {
                     self.transcript.push(TranscriptItem::system(
-                        "Harmony Prompt",
+                        "Model Prompt",
                         session.render_prompt(),
                     ));
                     self.follow_tail = true;
@@ -603,6 +606,57 @@ impl App {
                     ),
                 ));
                 self.status = "empty model response".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            TurnEvent::CrpRetryRequested {
+                attempt,
+                budget,
+                invalid_slots,
+                parse_error,
+            } => {
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
+                }
+                let detail = if let Some(error) = parse_error {
+                    format!("CRP parse failed: {error}. Asking the model to re-emit a valid trace.")
+                } else if invalid_slots.is_empty() {
+                    "CRP validation failed. Asking the model to retry.".to_string()
+                } else {
+                    format!(
+                        "Invalid slots: {}. Asking the model to retry.",
+                        invalid_slots.join(", ")
+                    )
+                };
+                self.transcript.push(TranscriptItem::system(
+                    format!("CRP Retry {attempt}/{budget}"),
+                    detail,
+                ));
+                self.status = "crp retry".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            TurnEvent::CrpRetryExhausted {
+                budget,
+                invalid_slots,
+            } => {
+                let detail = if invalid_slots.is_empty() {
+                    format!(
+                        "CRP retry budget ({budget}) exhausted. Surfacing the best-effort response with warnings."
+                    )
+                } else {
+                    format!(
+                        "CRP retry budget ({budget}) exhausted with invalid slots: {}. Surfacing the best-effort response.",
+                        invalid_slots.join(", ")
+                    )
+                };
+                self.transcript.push(TranscriptItem::system(
+                    "CRP Retry Exhausted",
+                    detail,
+                ));
+                self.status = "crp retry exhausted".to_string();
                 self.status_kind = StatusKind::Warn;
                 self.follow_tail = true;
             }
@@ -942,6 +996,7 @@ impl App {
                 | SettingField::AutoContextCompression
                 | SettingField::WorkspaceInstructions
                 | SettingField::ThinkingEffort
+                | SettingField::ReasoningProtocol
                 | SettingField::Format
         ) {
             return self.toggle_setting();
@@ -979,6 +1034,10 @@ impl App {
             }
             SettingField::ThinkingEffort => {
                 config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);
+            }
+            SettingField::ReasoningProtocol => {
+                config.harness.reasoning_protocol =
+                    next_reasoning_protocol(&config.harness.reasoning_protocol);
             }
             SettingField::Format => {
                 config.model.format = next_format(&config.model.format);
@@ -1070,12 +1129,19 @@ fn current_path_prefix(input: &str) -> Option<((usize, usize), String)> {
 }
 
 fn derive_stream_phase(body: &str) -> StreamPhase {
+    let visible = visible_stream_body(body);
+    if visible.trim_start().starts_with('<')
+        && let Some(slot) = crate::crp::active_slot(&visible)
+    {
+        return StreamPhase::CrpSlot(slot);
+    }
+
     const MARKER: &str = "<|channel|>";
     let Some(idx) = body.rfind(MARKER) else {
         return if body.is_empty() {
             StreamPhase::WarmingUp
         } else {
-            StreamPhase::Thinking
+            StreamPhase::Responding
         };
     };
     let after = &body[idx + MARKER.len()..];
@@ -1106,6 +1172,15 @@ fn derive_stream_phase(body: &str) -> StreamPhase {
     }
 }
 
+fn visible_stream_body(body: &str) -> String {
+    let sanitized = sanitize_stream_body(body);
+    if sanitized.is_empty() && !body.contains("<|") {
+        body.to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn is_path_like(token: &str) -> bool {
     token.len() >= 2
         && !token.starts_with('/')
@@ -1114,4 +1189,33 @@ fn is_path_like(token: &str) -> bool {
             || token
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_crp_slot_from_plain_stream() {
+        assert_eq!(
+            derive_stream_phase("<PROPOSED_APPROACH>\n- Add CRP UI."),
+            StreamPhase::CrpSlot("PROPOSED_APPROACH".to_string())
+        );
+    }
+
+    #[test]
+    fn derives_crp_slot_from_harmony_final_stream() {
+        assert_eq!(
+            derive_stream_phase("<|channel|>final<|message|><FILE_EDITS>\n@@ src/main.rs prepend"),
+            StreamPhase::CrpSlot("FILE_EDITS".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_uppercase_markup_when_stream_is_not_crp() {
+        assert_eq!(
+            derive_stream_phase("Use <TOKEN> as placeholder."),
+            StreamPhase::Responding
+        );
+    }
 }

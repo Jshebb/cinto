@@ -405,6 +405,11 @@ impl App {
                         "thinking".to_string(),
                         self.theme.phase_style(PhaseGlyph::Thinking),
                     ),
+                    StreamPhase::CrpSlot(slot) => (
+                        PhaseGlyph::Responding,
+                        format!("CRP · {}", crp_slot_label(slot)),
+                        self.theme.phase_style(PhaseGlyph::Responding),
+                    ),
                     StreamPhase::CallingTool(name) => {
                         let action = match name.as_str() {
                             "read_file" => "reading file",
@@ -563,6 +568,10 @@ impl App {
             Line::raw(format!(
                 "messages: {}  todos: {}",
                 self.history_len, self.todo_status_line
+            )),
+            Line::raw(format!(
+                "format: {}  reasoning: {}",
+                self.config.model.format, self.config.harness.reasoning_protocol
             )),
             Line::raw(format!(
                 "ctx: {} / {}",
@@ -988,6 +997,7 @@ fn stream_header_line(
     first_token_at: Option<Instant>,
 ) -> Line<'static> {
     let channel = match phase {
+        StreamPhase::CrpSlot(_) => "crp",
         StreamPhase::Responding => "final",
         StreamPhase::CallingTool(_) => "commentary",
         StreamPhase::Idle | StreamPhase::WarmingUp | StreamPhase::Thinking => "analysis",
@@ -1004,6 +1014,24 @@ fn stream_header_line(
         Span::styled(format!(" · {tokens} tokens{speed} "), theme.dim_style()),
         Span::styled("───", theme.chrome_style()),
     ])
+}
+
+fn crp_slot_label(slot: &str) -> &'static str {
+    match slot {
+        "TASK_INTERPRETATION" => "task interpretation",
+        "ASSUMPTIONS" => "assumptions",
+        "RELEVANT_FILES" => "relevant files",
+        "PROPOSED_APPROACH" => "proposed approach",
+        "RISKS" => "risks",
+        "DELIVERABLE_SPEC" => "deliverable spec",
+        "FILE_EDITS" => "file edits",
+        "COMMAND_PROPOSALS" => "command proposals",
+        "CHECKPOINTS" => "checkpoints",
+        "CLARIFICATION_REQUEST" => "clarification request",
+        "FINAL_RESPONSE" => "final response",
+        "SKILLS_USED" => "skills used",
+        _ => "custom slot",
+    }
 }
 
 fn tool_panel_lines(theme: &Theme, title: &str, body: &str, width: u16) -> Vec<Line<'static>> {

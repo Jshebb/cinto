@@ -12,6 +12,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use crate::{
     adapter::{AssistantOutput, PromptAdapter, build_adapter},
     config::Config,
+    crp,
     model::ModelClient,
 };
 
@@ -62,6 +63,16 @@ pub enum TurnEvent {
     EmptyModelResponse {
         format: String,
         model: String,
+    },
+    CrpRetryRequested {
+        attempt: u32,
+        budget: u32,
+        invalid_slots: Vec<String>,
+        parse_error: Option<String>,
+    },
+    CrpRetryExhausted {
+        budget: u32,
+        invalid_slots: Vec<String>,
     },
     Message(Message),
 }
@@ -116,14 +127,10 @@ pub struct AgentSession {
 impl AgentSession {
     pub fn new(config: Config) -> Self {
         let adapter = build_adapter(&config).unwrap_or_else(|error| {
-            eprintln!("warning: {error}; falling back to harmony adapter");
-            Box::new(crate::adapter::HarmonyAdapter::new(
-                config.harness.system_prompt.clone(),
-                format!(
-                    "{}\n\nAGENTS.md instructions were not loaded because adapter initialization failed.",
-                    config.harness.developer_prompt
-                ),
-            ))
+            eprintln!(
+                "warning: {error}; falling back to harmony transport with configured reasoning protocol"
+            );
+            fallback_adapter(&config)
         });
         let client = ModelClient::new(config.model.clone());
 
@@ -147,14 +154,10 @@ impl AgentSession {
 
     pub fn update_config(&mut self, config: Config) {
         self.adapter = build_adapter(&config).unwrap_or_else(|error| {
-            eprintln!("warning: {error}; falling back to harmony adapter");
-            Box::new(crate::adapter::HarmonyAdapter::new(
-                config.harness.system_prompt.clone(),
-                format!(
-                    "{}\n\nAGENTS.md instructions were not loaded because adapter initialization failed.",
-                    config.harness.developer_prompt
-                ),
-            ))
+            eprintln!(
+                "warning: {error}; falling back to harmony transport with configured reasoning protocol"
+            );
+            fallback_adapter(&config)
         });
         self.client = ModelClient::new(config.model.clone());
         self.config = config;
@@ -219,6 +222,13 @@ impl AgentSession {
         event_tx: UnboundedSender<TurnEvent>,
     ) -> Result<()> {
         let max_tool_turns = self.config.harness.max_tool_turns.max(1);
+        let crp_enabled = self
+            .config
+            .harness
+            .reasoning_protocol
+            .eq_ignore_ascii_case("crp");
+        let crp_budget = self.config.harness.crp_retry_budget;
+        let mut crp_retries_used: u32 = 0;
 
         for _ in 0..max_tool_turns {
             if let Some(event) = self.compact_context_if_needed() {
@@ -242,6 +252,16 @@ impl AgentSession {
                                         model: self.config.model.model.clone(),
                                     });
                                     return Ok(());
+                                }
+                                if crp_enabled
+                                    && self.handle_crp_validation(
+                                        &text,
+                                        &mut crp_retries_used,
+                                        crp_budget,
+                                        &event_tx,
+                                    )
+                                {
+                                    break;
                                 }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
@@ -279,6 +299,16 @@ impl AgentSession {
                                     });
                                     return Ok(());
                                 }
+                                if crp_enabled
+                                    && self.handle_crp_validation(
+                                        &text,
+                                        &mut crp_retries_used,
+                                        crp_budget,
+                                        &event_tx,
+                                    )
+                                {
+                                    break;
+                                }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
                                 let _ = event_tx.send(TurnEvent::Message(message));
@@ -299,6 +329,62 @@ impl AgentSession {
         self.history.push(message.clone());
         let _ = event_tx.send(TurnEvent::Message(message));
         Ok(())
+    }
+
+    fn handle_crp_validation(
+        &mut self,
+        text: &str,
+        retries_used: &mut u32,
+        budget: u32,
+        event_tx: &UnboundedSender<TurnEvent>,
+    ) -> bool {
+        let workspace = self.config.harness.workspace.clone();
+        let config = crp::ValidationConfig {
+            workspace: Some(workspace.as_path()),
+            ..crp::ValidationConfig::default()
+        };
+
+        let (retry_message, invalid_slots, parse_error) = match crp::parse(text) {
+            Ok(trace) => {
+                let report = crp::validate(&trace, &config);
+                if report.is_executable() {
+                    return false;
+                }
+                let invalid: Vec<String> = report
+                    .invalid()
+                    .map(|outcome| outcome.slot.clone())
+                    .collect();
+                (crp::build_retry_message(&report), invalid, None)
+            }
+            Err(error) => (
+                crp::build_parse_retry_message(&error),
+                Vec::new(),
+                Some(error.to_string()),
+            ),
+        };
+
+        if *retries_used >= budget {
+            let _ = event_tx.send(TurnEvent::CrpRetryExhausted {
+                budget,
+                invalid_slots,
+            });
+            return false;
+        }
+
+        *retries_used += 1;
+        let attempt = *retries_used;
+
+        let assistant = Message::assistant_final(text.to_string());
+        self.history.push(assistant);
+        self.history.push(Message::user(retry_message));
+
+        let _ = event_tx.send(TurnEvent::CrpRetryRequested {
+            attempt,
+            budget,
+            invalid_slots,
+            parse_error,
+        });
+        true
     }
 
     fn compact_context_if_needed(&mut self) -> Option<TurnEvent> {
@@ -597,6 +683,17 @@ impl AgentSession {
             Ok(joined)
         }
     }
+}
+
+fn fallback_adapter(config: &Config) -> Box<dyn PromptAdapter> {
+    let mut fallback = config.clone();
+    fallback.model.format = "harmony".to_string();
+    build_adapter(&fallback).unwrap_or_else(|_| {
+        Box::new(crate::adapter::HarmonyAdapter::new(
+            config.harness.system_prompt.clone(),
+            config.harness.developer_prompt.clone(),
+        ))
+    })
 }
 
 fn is_protected_workspace_component(name: &std::ffi::OsStr) -> bool {
@@ -1110,5 +1207,115 @@ mod tests {
             .expect("context should compact");
 
         assert_ne!(session.history[1].role, Role::Tool);
+    }
+
+    #[test]
+    fn handle_crp_validation_no_op_for_valid_trace() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let retried = session.handle_crp_validation(
+            "<FINAL_RESPONSE>All good.</FINAL_RESPONSE>",
+            &mut retries,
+            3,
+            &tx,
+        );
+
+        assert!(!retried);
+        assert_eq!(retries, 0);
+        assert!(rx.try_recv().is_err());
+        assert!(session.history.is_empty());
+    }
+
+    #[test]
+    fn handle_crp_validation_pushes_retry_when_final_response_missing() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let retried = session.handle_crp_validation(
+            "<TASK_INTERPRETATION>x</TASK_INTERPRETATION>",
+            &mut retries,
+            3,
+            &tx,
+        );
+
+        assert!(retried);
+        assert_eq!(retries, 1);
+        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.history[0].role, Role::Assistant);
+        assert_eq!(session.history[1].role, Role::User);
+        assert!(session.history[1].content.contains("<RETRY_REASON>"));
+        assert!(session.history[1].content.contains("FINAL_RESPONSE"));
+
+        match rx.try_recv().expect("event") {
+            TurnEvent::CrpRetryRequested {
+                attempt,
+                budget,
+                invalid_slots,
+                parse_error,
+            } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(budget, 3);
+                assert_eq!(invalid_slots, vec!["FINAL_RESPONSE".to_string()]);
+                assert!(parse_error.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_crp_validation_emits_exhausted_when_budget_consumed() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 3u32;
+
+        let retried = session.handle_crp_validation(
+            "<TASK_INTERPRETATION>x</TASK_INTERPRETATION>",
+            &mut retries,
+            3,
+            &tx,
+        );
+
+        assert!(!retried);
+        assert_eq!(retries, 3);
+        assert!(session.history.is_empty());
+        match rx.try_recv().expect("event") {
+            TurnEvent::CrpRetryExhausted {
+                budget,
+                invalid_slots,
+            } => {
+                assert_eq!(budget, 3);
+                assert_eq!(invalid_slots, vec!["FINAL_RESPONSE".to_string()]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_crp_validation_retries_on_parse_failure() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let retried = session.handle_crp_validation("hello", &mut retries, 3, &tx);
+
+        assert!(retried);
+        assert_eq!(retries, 1);
+        match rx.try_recv().expect("event") {
+            TurnEvent::CrpRetryRequested { parse_error, .. } => {
+                assert!(parse_error.is_some());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

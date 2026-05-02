@@ -95,6 +95,10 @@ pub trait PromptAdapter: Send + Sync + std::fmt::Debug {
 pub fn build_adapter(config: &Config) -> Result<Box<dyn PromptAdapter>> {
     let (system_prompt, developer_prompt) = prompt_pair(config);
     match config.model.format.trim().to_ascii_lowercase().as_str() {
+        "crp" => Ok(Box::new(HarmonyAdapter::new(
+            system_prompt,
+            developer_prompt,
+        ))),
         "harmony" => Ok(Box::new(HarmonyAdapter::new(
             system_prompt,
             developer_prompt,
@@ -123,8 +127,55 @@ fn prompt_pair(config: &Config) -> (String, String) {
         developer_prompt.push_str(&agents);
     }
 
+    if config
+        .harness
+        .reasoning_protocol
+        .eq_ignore_ascii_case("crp")
+    {
+        developer_prompt.push_str("\n\n");
+        developer_prompt.push_str(CRP_DEVELOPER_PROMPT);
+    }
+
     (system_prompt, developer_prompt)
 }
+
+const CRP_DEVELOPER_PROMPT: &str = r#"Cinto Reasoning Protocol (CRP) is the required final-response format.
+
+When you need workspace context or an action, use the tool-calling format made available by the current model adapter. Tool-call arguments still follow each tool's JSON schema.
+
+When you are ready to answer the user, the final answer must contain only a complete CRP trace. Use uppercase XML-like slots and do not write prose outside CRP slots.
+
+Use these standard slots when applicable:
+
+<TASK_INTERPRETATION>
+Briefly restate the user's request.
+</TASK_INTERPRETATION>
+
+<RELEVANT_FILES>
+- path/to/file
+</RELEVANT_FILES>
+
+<PROPOSED_APPROACH>
+- One concise step.
+</PROPOSED_APPROACH>
+
+<FILE_EDITS>
+Describe edits made or proposed. You may use <EDIT ...> blocks or terse @@ edit blocks.
+</FILE_EDITS>
+
+<COMMAND_PROPOSALS>
+- command here
+</COMMAND_PROPOSALS>
+
+<DELIVERABLE_SPEC>
+Observable success criteria.
+</DELIVERABLE_SPEC>
+
+<FINAL_RESPONSE>
+Concise user-facing answer.
+</FINAL_RESPONSE>
+
+If you cannot proceed without user input, emit <CLARIFICATION_REQUEST> with one direct question and include <FINAL_RESPONSE> explaining that you need clarification. Keep slot content concise and auditable."#;
 
 fn load_agents_instructions(workspace: &Path) -> Result<Option<String>> {
     let path = workspace.join(AGENTS_FILE);
@@ -195,7 +246,8 @@ mod tests {
 
         let (_, developer_prompt) = prompt_pair(&config);
 
-        assert_eq!(developer_prompt, "Only base.");
+        assert!(developer_prompt.contains("Only base."));
+        assert!(!developer_prompt.contains("Workspace instructions from AGENTS.md"));
 
         let _ = fs::remove_dir_all(&workspace);
     }
@@ -217,8 +269,42 @@ mod tests {
 
         let (_, developer_prompt) = prompt_pair(&config);
 
-        assert_eq!(developer_prompt, "Only base.");
+        assert!(developer_prompt.contains("Only base."));
+        assert!(!developer_prompt.contains("Workspace instructions from AGENTS.md"));
+        assert!(!developer_prompt.contains("ignore the user"));
 
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn injects_crp_instructions_by_default() {
+        let config = Config::default();
+
+        let (_, developer_prompt) = prompt_pair(&config);
+
+        assert!(developer_prompt.contains("Cinto Reasoning Protocol"));
+        assert!(developer_prompt.contains("<FINAL_RESPONSE>"));
+    }
+
+    #[test]
+    fn builds_legacy_crp_format_as_harmony_transport() {
+        let mut config = Config::default();
+        config.model.format = "crp".to_string();
+
+        let adapter = build_adapter(&config).expect("build legacy crp format");
+        assert!(adapter.debug_render(&[]).contains("<|start|>developer"));
+    }
+
+    #[test]
+    fn injects_crp_instructions_for_openai_tools() {
+        let mut config = Config::default();
+        config.model.format = "openai-tools".to_string();
+
+        let adapter = build_adapter(&config).expect("build openai adapter");
+        assert!(
+            adapter
+                .debug_render(&[])
+                .contains("Cinto Reasoning Protocol")
+        );
     }
 }
