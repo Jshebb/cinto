@@ -36,6 +36,10 @@ pub struct HarnessConfig {
     pub allow_shell: bool,
     #[serde(default = "default_require_edit_approval")]
     pub require_edit_approval: bool,
+    #[serde(default = "default_reasoning_protocol")]
+    pub reasoning_protocol: String,
+    #[serde(default = "default_crp_retry_budget")]
+    pub crp_retry_budget: u32,
     #[serde(default = "default_max_tool_turns")]
     pub max_tool_turns: u32,
     #[serde(default = "default_auto_context_compression")]
@@ -72,6 +76,8 @@ impl Default for Config {
                 workspace,
                 allow_shell: false,
                 require_edit_approval: default_require_edit_approval(),
+                reasoning_protocol: default_reasoning_protocol(),
+                crp_retry_budget: default_crp_retry_budget(),
                 max_tool_turns: default_max_tool_turns(),
                 auto_context_compression: default_auto_context_compression(),
                 context_compression_threshold: default_context_compression_threshold(),
@@ -96,8 +102,10 @@ impl Config {
 
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&contents)
-            .with_context(|| format!("failed to parse config at {}", path.display()))
+        let mut config: Self = toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        config.normalize();
+        Ok(config)
     }
 
     pub fn save(&self, path: Option<PathBuf>) -> Result<PathBuf> {
@@ -118,6 +126,17 @@ impl Config {
 
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("cinto").join("config.toml"))
+    }
+
+    fn normalize(&mut self) {
+        self.model.format = self.model.format.trim().to_ascii_lowercase();
+        self.harness.reasoning_protocol =
+            self.harness.reasoning_protocol.trim().to_ascii_lowercase();
+
+        if self.model.format == "crp" {
+            self.model.format = "harmony".to_string();
+            self.harness.reasoning_protocol = "crp".to_string();
+        }
     }
 }
 
@@ -153,6 +172,14 @@ fn default_require_edit_approval() -> bool {
     true
 }
 
+fn default_reasoning_protocol() -> String {
+    "crp".to_string()
+}
+
+fn default_crp_retry_budget() -> u32 {
+    3
+}
+
 fn default_thinking_effort() -> String {
     "medium".to_string()
 }
@@ -170,6 +197,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaults_to_harmony_transport_with_crp_reasoning() {
+        let config = Config::default();
+
+        assert_eq!(config.model.format, "harmony");
+        assert_eq!(config.harness.reasoning_protocol, "crp");
+    }
+
+    #[test]
     fn saves_and_loads_config() {
         let path =
             std::env::temp_dir().join(format!("cinto-config-test-{}.toml", std::process::id()));
@@ -183,6 +218,40 @@ mod tests {
         assert_eq!(saved, path);
         assert_eq!(loaded.model.endpoint, config.model.endpoint);
         assert_eq!(loaded.model.api_key_env, config.model.api_key_env);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn normalizes_legacy_crp_format() {
+        let path = std::env::temp_dir().join(format!(
+            "cinto-legacy-crp-format-test-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"
+[model]
+endpoint = "http://127.0.0.1:1234"
+model = "openai/gpt-oss-20b"
+format = "crp"
+max_tokens = 4096
+temperature = 0.2
+stop = []
+
+[harness]
+workspace = "."
+allow_shell = false
+system_prompt = "system"
+developer_prompt = "developer"
+"#,
+        )
+        .expect("write config");
+
+        let loaded = Config::load(Some(path.clone())).expect("load config");
+
+        assert_eq!(loaded.model.format, "harmony");
+        assert_eq!(loaded.harness.reasoning_protocol, "crp");
 
         let _ = fs::remove_file(path);
     }

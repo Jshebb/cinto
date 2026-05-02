@@ -5,6 +5,7 @@ use ratatui::{
 use serde_json::Value;
 
 use crate::{
+    crp,
     session::{Channel, Message, Role},
     theme::{RoleKind, StatusKind, Theme},
 };
@@ -66,11 +67,17 @@ impl TranscriptItem {
 
     pub(super) fn from_message(message: &Message) -> Self {
         match (message.role, message.channel, &message.recipient) {
-            (Role::Assistant, Some(Channel::Final), _) => Self {
-                role: TranscriptRole::Assistant,
-                title: "Assistant".to_string(),
-                body: message.content.clone(),
-            },
+            (Role::Assistant, Some(Channel::Final), _) => {
+                if let Some(item) = Self::from_crp_content(&message.content) {
+                    item
+                } else {
+                    Self {
+                        role: TranscriptRole::Assistant,
+                        title: "Assistant".to_string(),
+                        body: message.content.clone(),
+                    }
+                }
+            }
             (Role::Assistant, Some(Channel::Commentary), Some(recipient)) => {
                 let name = clean_recipient(recipient);
                 let short = strip_functions_prefix(&name);
@@ -97,6 +104,25 @@ impl TranscriptItem {
                 title: "Message".to_string(),
                 body: message.content.clone(),
             },
+        }
+    }
+
+    fn from_crp_content(content: &str) -> Option<Self> {
+        match crp::parse(content) {
+            Ok(trace) => Some(Self {
+                role: TranscriptRole::Assistant,
+                title: format!("CRP Trace · {} slots", trace.slots.len()),
+                body: format_crp_trace(&trace),
+            }),
+            Err(error) if looks_like_crp(content) => Some(Self {
+                role: TranscriptRole::Error,
+                title: "CRP Parse Error".to_string(),
+                body: format!(
+                    "{error}\n\nraw preview:\n{}",
+                    truncate_tool_body(content.trim(), ToolPreviewKind::Result)
+                ),
+            }),
+            Err(_) => None,
         }
     }
 }
@@ -223,6 +249,114 @@ fn clean_recipient(recipient: &str) -> String {
 
 fn strip_functions_prefix(name: &str) -> &str {
     name.strip_prefix("functions.").unwrap_or(name)
+}
+
+fn looks_like_crp(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    let Some(after_open) = trimmed.strip_prefix('<') else {
+        return false;
+    };
+    after_open.starts_with('/')
+        || after_open
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase())
+}
+
+fn format_crp_trace(trace: &crp::Trace) -> String {
+    let mut lines = vec![format!(
+        "CRP {} · {} slots",
+        crp::VERSION,
+        trace.slots.len()
+    )];
+
+    for slot in &trace.slots {
+        lines.push(String::new());
+        lines.push(format_crp_slot_heading(slot));
+
+        let content = truncate_tool_body(&slot.content, ToolPreviewKind::Result);
+        if content.trim().is_empty() {
+            lines.push("(empty)".to_string());
+        } else {
+            lines.extend(content.lines().map(ToString::to_string));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn format_crp_slot_heading(slot: &crp::Slot) -> String {
+    let mut details = vec![crp_slot_summary(slot)];
+    if !slot.attributes.is_empty() {
+        details.push(format_crp_attributes(&slot.attributes));
+    }
+
+    format!("**{}** · {}", slot.name, details.join(" · "))
+}
+
+fn crp_slot_summary(slot: &crp::Slot) -> String {
+    match slot.name.as_str() {
+        "TASK_INTERPRETATION" => "task understanding".to_string(),
+        "ASSUMPTIONS" => pluralize(count_list_items(&slot.content), "assumption"),
+        "RELEVANT_FILES" => pluralize(count_list_items(&slot.content), "file"),
+        "PROPOSED_APPROACH" => pluralize(count_list_items(&slot.content), "step"),
+        "RISKS" => pluralize(count_list_items(&slot.content), "risk"),
+        "DELIVERABLE_SPEC" => "success criteria".to_string(),
+        "FILE_EDITS" => pluralize(count_edit_blocks(&slot.content), "edit block"),
+        "COMMAND_PROPOSALS" => pluralize(count_list_items(&slot.content), "command"),
+        "CHECKPOINTS" => pluralize(count_list_items(&slot.content), "checkpoint"),
+        "CLARIFICATION_REQUEST" => "needs user input".to_string(),
+        "FINAL_RESPONSE" => "user-facing response".to_string(),
+        "SKILLS_USED" => pluralize(count_list_items(&slot.content), "skill"),
+        _ => format!("{} lines", slot.content.lines().count()),
+    }
+}
+
+fn format_crp_attributes(attributes: &[crp::Attribute]) -> String {
+    attributes
+        .iter()
+        .map(|attribute| format!("{}=\"{}\"", attribute.name, attribute.value))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn count_list_items(content: &str) -> usize {
+    let count = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- ") || trimmed.starts_with("* ")
+        })
+        .count();
+
+    if count == 0 && !content.trim().is_empty() {
+        1
+    } else {
+        count
+    }
+}
+
+fn count_edit_blocks(content: &str) -> usize {
+    let edit_tags = content.matches("<EDIT").count();
+    let terse_blocks = content
+        .lines()
+        .filter(|line| line.trim_start().starts_with("@@ "))
+        .count();
+    let count = edit_tags + terse_blocks;
+
+    if count == 0 && !content.trim().is_empty() {
+        1
+    } else {
+        count
+    }
+}
+
+fn pluralize(count: usize, label: &str) -> String {
+    if count == 1 {
+        format!("1 {label}")
+    } else {
+        format!("{count} {label}s")
+    }
 }
 
 fn format_tool_call_body(tool: &str, raw_args: &str) -> String {
@@ -474,4 +608,44 @@ fn clip_preview_line(line: &str) -> String {
     let keep = MAX_TOOL_PREVIEW_LINE_CHARS.saturating_sub(24);
     let preview = line.chars().take(keep).collect::<String>();
     format!("{preview} ... [line clipped]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_valid_crp_final_response_as_trace() {
+        let item = TranscriptItem::from_message(&Message::assistant_final(
+            r#"<TASK_INTERPRETATION>
+Parse CRP and show it in the UI.
+</TASK_INTERPRETATION>
+
+<FILE_EDITS>
+@@ src/main.rs prepend
+fn hello() {}
+</FILE_EDITS>
+
+<FINAL_RESPONSE>
+Done.
+</FINAL_RESPONSE>"#,
+        ));
+
+        assert_eq!(item.role, TranscriptRole::Assistant);
+        assert_eq!(item.title, "CRP Trace · 3 slots");
+        assert!(item.body.contains("CRP 1.0-draft · 3 slots"));
+        assert!(item.body.contains("**FILE_EDITS** · 1 edit block"));
+    }
+
+    #[test]
+    fn formats_malformed_crp_final_response_as_parse_error() {
+        let item = TranscriptItem::from_message(&Message::assistant_final(
+            "<FINAL_RESPONSE>\nMissing close",
+        ));
+
+        assert_eq!(item.role, TranscriptRole::Error);
+        assert_eq!(item.title, "CRP Parse Error");
+        assert!(item.body.contains("missing CRP closing tag"));
+        assert!(item.body.contains("raw preview:"));
+    }
 }

@@ -9,7 +9,10 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use super::{App, StatusKind, View, settings::next_format};
+use super::{
+    App, StatusKind, View,
+    settings::{next_format, next_reasoning_protocol},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SetupPreset {
@@ -52,6 +55,7 @@ enum SetupField {
     Endpoint,
     Model,
     Format,
+    ReasoningProtocol,
     Workspace,
     EditApproval,
     Shell,
@@ -59,11 +63,12 @@ enum SetupField {
     SaveStart,
 }
 
-const SETUP_FIELDS: [SetupField; 9] = [
+const SETUP_FIELDS: [SetupField; 10] = [
     SetupField::Preset,
     SetupField::Endpoint,
     SetupField::Model,
     SetupField::Format,
+    SetupField::ReasoningProtocol,
     SetupField::Workspace,
     SetupField::EditApproval,
     SetupField::Shell,
@@ -145,6 +150,12 @@ impl App {
                 config.model.format = next_format(&config.model.format);
                 self.apply_config(config);
             }
+            SetupField::ReasoningProtocol => {
+                let mut config = self.config.clone();
+                config.harness.reasoning_protocol =
+                    next_reasoning_protocol(&config.harness.reasoning_protocol);
+                self.apply_config(config);
+            }
             SetupField::EditApproval => {
                 let mut config = self.config.clone();
                 config.harness.require_edit_approval = !config.harness.require_edit_approval;
@@ -194,12 +205,14 @@ impl App {
                 config.model.endpoint = "http://127.0.0.1:1234".to_string();
                 config.model.model = "openai/gpt-oss-20b".to_string();
                 config.model.format = "harmony".to_string();
+                config.harness.reasoning_protocol = "crp".to_string();
                 config.model.thinking_effort = "medium".to_string();
             }
             SetupPreset::Ollama => {
                 config.model.endpoint = "http://127.0.0.1:11434".to_string();
                 config.model.model = "qwen2.5-coder:7b-instruct".to_string();
                 config.model.format = "openai-tools".to_string();
+                config.harness.reasoning_protocol = "crp".to_string();
                 config.model.thinking_effort = "none".to_string();
                 config.model.stop.clear();
             }
@@ -233,6 +246,7 @@ impl App {
             SetupField::Endpoint => self.config.model.endpoint.clone(),
             SetupField::Model => self.config.model.model.clone(),
             SetupField::Format => self.config.model.format.clone(),
+            SetupField::ReasoningProtocol => self.config.harness.reasoning_protocol.clone(),
             SetupField::Workspace => self.config.harness.workspace.display().to_string(),
             SetupField::EditApproval => bool_label(self.config.harness.require_edit_approval),
             SetupField::Shell => bool_label(self.config.harness.allow_shell),
@@ -399,6 +413,7 @@ impl SetupField {
             Self::Endpoint => "endpoint",
             Self::Model => "model",
             Self::Format => "format",
+            Self::ReasoningProtocol => "reasoning",
             Self::Workspace => "workspace",
             Self::EditApproval => "edit approval",
             Self::Shell => "shell tools",

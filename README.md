@@ -131,7 +131,7 @@ explicit `/v1/completions` endpoint for text-completion servers.
 
 | Server | Example endpoint | Recommended format | Notes |
 | --- | --- | --- | --- |
-| LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Use the model id shown by LM Studio. |
+| LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Default transport. CRP reasoning is enabled by default. |
 | LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`. |
 | Ollama | `http://127.0.0.1:11434` | `openai-tools` | Pull a tool-capable model such as `qwen2.5-coder:7b-instruct`. |
 
@@ -239,6 +239,7 @@ context_window = 8192
 workspace = "/home/you/project"
 allow_shell = false
 require_edit_approval = true
+reasoning_protocol = "crp"    # crp or plain
 max_tool_turns = 16
 auto_context_compression = true
 context_compression_threshold = 80
@@ -251,12 +252,16 @@ developer_prompt = "Use concise reasoning, ask before destructive actions, and p
 When `api_key_env` is set, Cinto reads the secret from that environment variable
 and sends it as a bearer token. The TUI stores the variable name, not the secret.
 
-## Supported Tool Formats
+## Supported Tool Formats And Reasoning
 
 | Format | Tool-calling shape | Best fit |
 | --- | --- | --- |
 | `harmony` | Tool calls embedded in Harmony-style assistant text | `gpt-oss-20b`, `gpt-oss-120b`, and Harmony-compatible servers |
 | `openai-tools` | Native OpenAI-compatible `tools` and `tool_calls` fields | Qwen, Llama, Ollama, LM Studio, and other OpenAI-compatible chat servers |
+
+`harness.reasoning_protocol = "crp"` is enabled by default and works with both
+tool formats. It asks the model to return final answers as CRP slot traces while
+leaving tool invocation to the selected transport.
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
 ask for a narrower step. If the model returns neither text nor a tool call,

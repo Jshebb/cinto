@@ -1,5 +1,6 @@
 mod adapter;
 mod config;
+pub mod crp;
 mod harmony;
 mod model;
 mod session;
@@ -24,7 +25,7 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    #[arg(long, help = "Render the current empty Harmony prompt and exit")]
+    #[arg(long, help = "Render the current empty model prompt and exit")]
     print_prompt: bool,
 
     #[arg(

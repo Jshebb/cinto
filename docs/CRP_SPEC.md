@@ -42,6 +42,16 @@ OpenAI-compatible API, local llama.cpp, etc). It does not mandate specific
 tool-calling formats. It does not replace function calling or tool invocation;
 CRP describes reasoning, tools handle action.
 
+In Cinto, CRP is a reasoning protocol rather than a transport format. It can be
+enabled independently of whether the selected model adapter uses Harmony text
+tool calls or OpenAI-compatible `tools` / `tool_calls`.
+
+CRP also does not authorize the agent to silently rewrite its own harness
+configuration based on conversation. Harness configuration must remain explicit,
+user-controlled, and reproducible. Project-local guidance may be loaded into
+prompt context, but persistent configuration changes require an explicit user
+action outside normal model output.
+
 ## 2. Syntax
 
 CRP uses XML-like slot tags. Each slot is delimited by an opening tag and a
@@ -439,9 +449,47 @@ The `FILE_EDITS` subformat is intentionally not final in v1.0-draft. Edit modes
 such as prepend, append, replace, and string replacement should be specified
 after dogfooding against existing agent editing conventions.
 
+A candidate v1.1 edit subformat is a terse diff-inspired block syntax inside
+`FILE_EDITS`, optimized for small local models already familiar with patches:
+
+```text
+<FILE_EDITS>
+@@ src/main.rs prepend
+fn hello() { println!("hi"); }
+@@ src/lib.rs replace_function:greet
+pub fn greet() -> String { "hello".into() }
+</FILE_EDITS>
+```
+
+Each `@@` header starts a new edit directive. The first token after `@@` is the
+path, and the remaining header text is the edit mode or operation descriptor.
+The body continues until the next `@@` header or the end of `FILE_EDITS`.
+This format is more compact than nested JSON or XML-like edit blocks, and it is
+closer to training data that contains unified diffs. The reference
+implementation should dogfood both `<EDIT ...>` blocks and this terse form
+before freezing the `FILE_EDITS` grammar.
+
 Template classification is intentionally underspecified. v1.0 should assume
 manual template selection; automatic classification belongs in a future minor
 version.
 
 Slot names are always uppercase English identifiers for parser stability.
 Slot content may be written in any natural language.
+
+Post-v0.2 roadmap note: Cinto v0.3.x should explore Skills + hierarchical
+AGENTS.md as a single capability set:
+
+- Skills loaded on demand from `.cinto/skills/*.md`.
+- Hierarchical `AGENTS.md` discovery, ordered from global to project to module.
+- A `list_skills()` tool exposed to the agent for explicit discovery.
+- Optional audit slot:
+
+```text
+<SKILLS_USED>
+- rust-parser
+- project-style
+</SKILLS_USED>
+```
+
+`SKILLS_USED` records which skills were consulted during a trace. It should be
+informative for auditability, not a mechanism for mutating configuration.
