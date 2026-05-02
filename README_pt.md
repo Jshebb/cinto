@@ -1,6 +1,6 @@
 # Cinto
 
-[English](README.md) · [Notas de arquitetura](docs/architecture.md)
+[English](README.md) · [Notas de arquitetura](docs/architecture.md) · [Spec CRP](docs/CRP_SPEC.md)
 
 ![Cinto TUI](docs/demo.png)
 
@@ -26,6 +26,8 @@ A maioria dos agentes esconde o harness. O Cinto deixa a engrenagem visível.
 - **Contexto persistente:** suporte opcional a `AGENTS.md` na raiz do projeto.
 - **Gestão de contexto:** resultados grandes e histórico antigo são compactados
   antes de estourar a janela do modelo.
+- **Protocolo de raciocínio:** CRP explora traces tipados e auditáveis para
+  agentes de código pequenos ou comprimidos.
 
 ## Instalação
 

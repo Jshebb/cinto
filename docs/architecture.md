@@ -44,6 +44,14 @@ session adapter is built. The file is appended to the developer instructions for
 both Harmony and OpenAI tool-calling adapters, so project context applies across
 model formats. The loaded content is bounded to keep prompt size predictable.
 
+## Reasoning Protocol
+
+The draft Cinto Reasoning Protocol (CRP) is documented in
+[CRP_SPEC.md](CRP_SPEC.md). CRP is a proposed structured-output layer for
+typed, auditable reasoning traces. It is not implemented in the current runtime
+yet; the first implementation milestone should start with a parser, slot
+validator, and retry feedback loop before any model fine-tuning work.
+
 ## Tool Policy
 
 Milestone 1 exposes workspace tools:

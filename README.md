@@ -8,7 +8,7 @@ servers.** It gives local and open-weight models a focused workspace loop:
 read files, search code, propose edits, keep todos, inspect prompts, and stay
 inside explicit safety rails.
 
-[Português](README_pt.md) · [Architecture notes](docs/architecture.md)
+[Português](README_pt.md) · [Architecture notes](docs/architecture.md) · [CRP spec](docs/CRP_SPEC.md)
 
 ![Cinto TUI](docs/demo.png)
 
@@ -30,6 +30,8 @@ Most coding agents hide the harness. Cinto keeps it visible.
   workspace root.
 - **Context management:** large tool outputs and older transcript history are
   compacted before they overwhelm the model context window.
+- **Reasoning protocol draft:** CRP explores typed, auditable reasoning traces
+  for small and compressed coding agents.
 
 ## Install
 
