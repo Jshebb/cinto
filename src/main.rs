@@ -62,13 +62,15 @@ enum Command {
             help = "Optional LLM endpoint to use as a semantic evaluator (e.g., https://api.deepseek.com/v1)"
         )]
         evaluator_endpoint: Option<String>,
-        #[arg(
-            long,
-            help = "Optional LLM model name for the evaluator (e.g., deepseek-chat)"
-        )]
+        #[arg(long, help = "Optional LLM model name for the evaluator (e.g., deepseek-chat)")]
         evaluator_model: Option<String>,
         #[arg(long, help = "Optional API key for the evaluator model")]
         evaluator_api_key: Option<String>,
+        #[arg(
+            long,
+            help = "Validate the JSONL and fixtures without calling the model"
+        )]
+        dry_run: bool,
     },
 }
 
@@ -89,6 +91,7 @@ async fn main() -> Result<()> {
         evaluator_endpoint,
         evaluator_model,
         evaluator_api_key,
+        dry_run,
     }) = args.command
     {
         batch::run(
@@ -98,6 +101,7 @@ async fn main() -> Result<()> {
             evaluator_endpoint,
             evaluator_model,
             evaluator_api_key,
+            dry_run,
         )
         .await?;
         return Ok(());
