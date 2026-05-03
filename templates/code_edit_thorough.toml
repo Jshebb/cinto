@@ -1,0 +1,21 @@
+name = "code_edit_thorough"
+description = "Thorough code edit with self-verification and edge case analysis."
+
+[slots.TASK_INTERPRETATION]
+required = true
+
+[slots.RELEVANT_FILES]
+required = true
+type = "BulletList<FilePath>"
+
+[slots.PROPOSED_APPROACH]
+required = true
+
+[slots.FILE_EDITS]
+required = true
+
+[slots.SELF_VERIFICATION]
+required = false
+
+[slots.FINAL_RESPONSE]
+required = true

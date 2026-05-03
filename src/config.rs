@@ -3,6 +3,64 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Config presets — embedded TOML profiles for common server setups
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ConfigPreset {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    toml: &'static str,
+}
+
+impl ConfigPreset {
+    /// Parse this preset's TOML into a partial `Config`, patching in runtime
+    /// workspace and prompt strings from the global default.
+    pub fn to_config(&self) -> Result<Config> {
+        let mut config: Config = toml::from_str(self.toml)
+            .with_context(|| format!("failed to parse built-in preset `{}`", self.name))?;
+        config.normalize();
+        Ok(config)
+    }
+}
+
+pub const PRESETS: &[ConfigPreset] = &[
+    ConfigPreset {
+        name: "lm-studio",
+        label: "LM Studio",
+        description: "Local LM Studio server with Harmony/gpt-oss defaults",
+        toml: include_str!("presets/lm_studio.toml"),
+    },
+    ConfigPreset {
+        name: "ollama",
+        label: "Ollama",
+        description: "Local Ollama server with OpenAI-tools format",
+        toml: include_str!("presets/ollama.toml"),
+    },
+    ConfigPreset {
+        name: "vllm",
+        label: "vLLM / OpenAI-compat",
+        description: "vLLM or any OpenAI-compatible API server",
+        toml: include_str!("presets/vllm.toml"),
+    },
+    ConfigPreset {
+        name: "minimal",
+        label: "Minimal",
+        description: "Bare-bones config without CRP reasoning",
+        toml: include_str!("presets/minimal.toml"),
+    },
+];
+
+pub fn preset_by_name(name: &str) -> Option<&'static ConfigPreset> {
+    PRESETS.iter().find(|p| p.name == name)
+}
+
+pub fn preset_index(name: &str) -> Option<usize> {
+    PRESETS.iter().position(|p| p.name == name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model: ModelConfig,
@@ -40,6 +98,8 @@ pub struct HarnessConfig {
     pub reasoning_protocol: String,
     #[serde(default = "default_crp_retry_budget")]
     pub crp_retry_budget: u32,
+    #[serde(default = "default_template")]
+    pub default_template: String,
     #[serde(default = "default_max_tool_turns")]
     pub max_tool_turns: u32,
     #[serde(default = "default_auto_context_compression")]
@@ -78,6 +138,7 @@ impl Default for Config {
                 require_edit_approval: default_require_edit_approval(),
                 reasoning_protocol: default_reasoning_protocol(),
                 crp_retry_budget: default_crp_retry_budget(),
+                default_template: default_template(),
                 max_tool_turns: default_max_tool_turns(),
                 auto_context_compression: default_auto_context_compression(),
                 context_compression_threshold: default_context_compression_threshold(),
@@ -145,11 +206,11 @@ fn default_timeout_secs() -> u64 {
 }
 
 fn default_context_window() -> u32 {
-    8192
+    32768
 }
 
 fn default_max_tool_turns() -> u32 {
-    16
+    24
 }
 
 fn default_auto_context_compression() -> bool {
@@ -178,6 +239,10 @@ fn default_reasoning_protocol() -> String {
 
 fn default_crp_retry_budget() -> u32 {
     3
+}
+
+fn default_template() -> String {
+    crate::crp::DEFAULT_TEMPLATE_NAME.to_string()
 }
 
 fn default_thinking_effort() -> String {
@@ -254,5 +319,61 @@ developer_prompt = "developer"
         assert_eq!(loaded.harness.reasoning_protocol, "crp");
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn all_presets_parse_successfully() {
+        for preset in PRESETS {
+            let config = preset
+                .to_config()
+                .unwrap_or_else(|e| panic!("preset `{}` failed to parse: {e}", preset.name));
+            assert!(
+                !config.model.endpoint.is_empty(),
+                "preset `{}` has empty endpoint",
+                preset.name
+            );
+            assert!(
+                !config.model.model.is_empty(),
+                "preset `{}` has empty model",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn preset_lm_studio_uses_harmony_and_crp() {
+        let preset = preset_by_name("lm-studio").expect("lm-studio preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "harmony");
+        assert_eq!(config.harness.reasoning_protocol, "crp");
+        assert!(config.model.endpoint.contains("1234"));
+    }
+
+    #[test]
+    fn preset_ollama_uses_openai_tools() {
+        let preset = preset_by_name("ollama").expect("ollama preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "openai-tools");
+        assert!(config.model.endpoint.contains("11434"));
+    }
+
+    #[test]
+    fn preset_minimal_disables_crp() {
+        let preset = preset_by_name("minimal").expect("minimal preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.harness.reasoning_protocol, "plain");
+        assert_eq!(config.harness.crp_retry_budget, 0);
+    }
+
+    #[test]
+    fn default_context_window_is_32k() {
+        let config = Config::default();
+        assert_eq!(config.model.context_window, 32768);
+    }
+
+    #[test]
+    fn default_max_tool_turns_is_24() {
+        let config = Config::default();
+        assert_eq!(config.harness.max_tool_turns, 24);
     }
 }

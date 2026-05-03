@@ -39,7 +39,7 @@ use self::{
     settings::{
         SETTINGS, SettingField, next_format, next_reasoning_protocol, next_thinking_effort,
     },
-    setup::SetupPreset,
+    setup::preset_index_from_endpoint,
     transcript::{TranscriptItem, sanitize_stream_body},
 };
 
@@ -83,7 +83,7 @@ pub struct App {
     setting_editor: Option<String>,
     setup_selected: usize,
     setup_editor: Option<String>,
-    setup_preset: SetupPreset,
+    setup_preset: usize,
     sidebar_visible: bool,
     header_expanded: bool,
     chat_scroll: u16,
@@ -113,7 +113,7 @@ impl App {
         let history_len = session.history_len();
         let todo_details = session.todo_details();
         let todo_status_line = session.todo_status_line();
-        let setup_preset = SetupPreset::from_endpoint(&config.model.endpoint);
+        let setup_preset = preset_index_from_endpoint(&config.model.endpoint);
 
         Self {
             session: Some(session),
@@ -652,10 +652,8 @@ impl App {
                         invalid_slots.join(", ")
                     )
                 };
-                self.transcript.push(TranscriptItem::system(
-                    "CRP Retry Exhausted",
-                    detail,
-                ));
+                self.transcript
+                    .push(TranscriptItem::system("CRP Retry Exhausted", detail));
                 self.status = "crp retry exhausted".to_string();
                 self.status_kind = StatusKind::Warn;
                 self.follow_tail = true;

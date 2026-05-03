@@ -134,6 +134,16 @@ fn prompt_pair(config: &Config) -> (String, String) {
     {
         developer_prompt.push_str("\n\n");
         developer_prompt.push_str(CRP_DEVELOPER_PROMPT);
+
+        let templates = crate::crp::TemplateSet::load(Some(
+            crate::crp::workspace_template_dir(&config.harness.workspace).as_path(),
+        ));
+        let template = templates.resolve(
+            &config.harness.default_template,
+            &config.model.thinking_effort,
+        );
+        developer_prompt.push_str("\n\n");
+        developer_prompt.push_str(&template.render_brief());
     }
 
     (system_prompt, developer_prompt)

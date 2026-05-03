@@ -1,23 +1,36 @@
-use std::{error::Error, fmt, ops::Range, path::Path};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    ops::Range,
+    path::{Path, PathBuf},
+};
+
+use serde::Deserialize;
 
 pub const VERSION: &str = "1.0-draft";
 
-pub const DEFAULT_REQUIRED_SLOTS: &[&str] = &["FINAL_RESPONSE"];
-pub const DEFAULT_FILE_PATH_SLOTS: &[&str] = &["RELEVANT_FILES"];
+pub fn default_required_slots() -> Vec<String> {
+    vec!["FINAL_RESPONSE".to_string()]
+}
+
+pub fn default_file_path_slots() -> Vec<String> {
+    vec!["RELEVANT_FILES".to_string()]
+}
 
 #[derive(Debug, Clone)]
 pub struct ValidationConfig<'a> {
     pub workspace: Option<&'a Path>,
-    pub required_slots: &'a [&'a str],
-    pub file_path_slots: &'a [&'a str],
+    pub required_slots: Vec<String>,
+    pub file_path_slots: Vec<String>,
 }
 
 impl Default for ValidationConfig<'_> {
     fn default() -> Self {
         Self {
             workspace: None,
-            required_slots: DEFAULT_REQUIRED_SLOTS,
-            file_path_slots: DEFAULT_FILE_PATH_SLOTS,
+            required_slots: default_required_slots(),
+            file_path_slots: default_file_path_slots(),
         }
     }
 }
@@ -65,17 +78,17 @@ impl ValidationReport {
 pub fn validate(trace: &Trace, config: &ValidationConfig<'_>) -> ValidationReport {
     let mut outcomes = Vec::new();
 
-    for required in config.required_slots {
-        match trace.get(required) {
+    for required in &config.required_slots {
+        match trace.get(required.as_str()) {
             None => outcomes.push(SlotOutcome {
-                slot: (*required).to_string(),
+                slot: required.clone(),
                 status: SlotStatus::Invalid,
                 message: format!(
                     "Required slot <{required}> is missing. Emit it with non-empty content."
                 ),
             }),
             Some(slot) if slot.content.trim().is_empty() => outcomes.push(SlotOutcome {
-                slot: (*required).to_string(),
+                slot: required.clone(),
                 status: SlotStatus::Invalid,
                 message: format!(
                     "Required slot <{required}> is present but empty. Provide concrete content."
@@ -86,8 +99,8 @@ pub fn validate(trace: &Trace, config: &ValidationConfig<'_>) -> ValidationRepor
     }
 
     if let Some(workspace) = config.workspace {
-        for slot_name in config.file_path_slots {
-            for slot in trace.get_all(slot_name) {
+        for slot_name in &config.file_path_slots {
+            for slot in trace.get_all(slot_name.as_str()) {
                 let mut missing = Vec::new();
                 for path in extract_bullet_paths(&slot.content) {
                     if !workspace.join(&path).exists() {
@@ -96,7 +109,7 @@ pub fn validate(trace: &Trace, config: &ValidationConfig<'_>) -> ValidationRepor
                 }
                 if !missing.is_empty() {
                     outcomes.push(SlotOutcome {
-                        slot: (*slot_name).to_string(),
+                        slot: slot_name.clone(),
                         status: SlotStatus::Invalid,
                         message: format!(
                             "Path(s) listed in <{slot_name}> do not exist in the workspace: {}. Use the read/list tools to confirm before listing files.",
@@ -160,9 +173,272 @@ fn extract_bullet_paths(content: &str) -> Vec<String> {
         if candidate.is_empty() {
             continue;
         }
-        paths.push(candidate.trim_end_matches(|c: char| matches!(c, ',' | ';')).to_string());
+        paths.push(
+            candidate
+                .trim_end_matches(|c: char| matches!(c, ',' | ';'))
+                .to_string(),
+        );
     }
     paths
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+const BUILTIN_CODE_EDIT: &str = include_str!("../templates/code_edit.toml");
+const BUILTIN_CODE_EDIT_MINIMAL: &str = include_str!("../templates/code_edit_minimal.toml");
+const BUILTIN_CODE_EDIT_THOROUGH: &str = include_str!("../templates/code_edit_thorough.toml");
+const BUILTIN_CODE_EXPLANATION: &str = include_str!("../templates/code_explanation.toml");
+const BUILTIN_DESIGN_PROPOSAL: &str = include_str!("../templates/design_proposal.toml");
+
+pub const DEFAULT_TEMPLATE_NAME: &str = "code_edit";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Template {
+    pub name: String,
+    pub description: String,
+    pub slots: Vec<TemplateSlot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateSlot {
+    pub name: String,
+    pub required: bool,
+    pub kind: TemplateSlotKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateSlotKind {
+    Generic,
+    FilePathList,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TemplateSet {
+    by_name: BTreeMap<String, Template>,
+}
+
+impl TemplateSet {
+    pub fn builtin() -> Self {
+        let mut set = Self::default();
+        for source in [
+            BUILTIN_CODE_EDIT,
+            BUILTIN_CODE_EDIT_MINIMAL,
+            BUILTIN_CODE_EDIT_THOROUGH,
+            BUILTIN_CODE_EXPLANATION,
+            BUILTIN_DESIGN_PROPOSAL,
+        ] {
+            let template = Template::from_toml_str(source).expect("builtin template parses");
+            set.insert(template);
+        }
+        set
+    }
+
+    pub fn load(workspace_overlay: Option<&Path>) -> Self {
+        let mut set = Self::builtin();
+        if let Some(dir) = workspace_overlay
+            && dir.is_dir()
+            && let Ok(entries) = fs::read_dir(dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                    continue;
+                }
+                match Template::from_path(&path) {
+                    Ok(template) => set.insert(template),
+                    Err(error) => eprintln!(
+                        "warning: failed to load template {}: {error}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        set
+    }
+
+    pub fn insert(&mut self, template: Template) {
+        self.by_name.insert(template.name.clone(), template);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Template> {
+        self.by_name.get(name)
+    }
+
+    pub fn select(&self, name: &str) -> &Template {
+        if let Some(template) = self.by_name.get(name) {
+            return template;
+        }
+        if let Some(template) = self.by_name.get(DEFAULT_TEMPLATE_NAME) {
+            eprintln!(
+                "warning: template `{name}` not found; falling back to `{DEFAULT_TEMPLATE_NAME}`"
+            );
+            return template;
+        }
+        self.by_name
+            .values()
+            .next()
+            .expect("template set must contain at least the builtin code_edit")
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
+    }
+
+    /// Select a template qualified by thinking effort.
+    ///
+    /// Maps `thinking_effort` to a suffix (`_minimal` for none/low, `_thorough`
+    /// for high) and looks up `"{base_name}_{suffix}"`. Falls back silently to
+    /// the base template when an effort-specific variant is not found.
+    pub fn resolve(&self, base_name: &str, thinking_effort: &str) -> &Template {
+        let qualified = effort_qualified_name(base_name, thinking_effort);
+        if let Some(name) = &qualified {
+            if let Some(template) = self.by_name.get(name.as_str()) {
+                return template;
+            }
+        }
+        self.select(base_name)
+    }
+}
+
+/// Compute the effort-qualified template name, if the effort level has a
+/// specific variant.
+fn effort_qualified_name(base_name: &str, thinking_effort: &str) -> Option<String> {
+    match thinking_effort.to_ascii_lowercase().as_str() {
+        "none" | "low" => Some(format!("{base_name}_minimal")),
+        "high" => Some(format!("{base_name}_thorough")),
+        _ => None, // "medium" and others use the base template
+    }
+}
+
+impl Template {
+    pub fn from_toml_str(source: &str) -> Result<Self, TemplateLoadError> {
+        let raw: RawTemplate =
+            toml::from_str(source).map_err(|error| TemplateLoadError::Parse(error.to_string()))?;
+        if raw.name.trim().is_empty() {
+            return Err(TemplateLoadError::Parse(
+                "template `name` is required".to_string(),
+            ));
+        }
+
+        let mut slots = Vec::with_capacity(raw.slots.len());
+        for (name, spec) in raw.slots {
+            if !is_slot_name(&name) {
+                return Err(TemplateLoadError::Parse(format!(
+                    "slot name `{name}` must be uppercase ASCII"
+                )));
+            }
+            let kind = match spec.r#type.as_deref() {
+                Some(value) if value.eq_ignore_ascii_case("BulletList<FilePath>") => {
+                    TemplateSlotKind::FilePathList
+                }
+                _ => TemplateSlotKind::Generic,
+            };
+            slots.push(TemplateSlot {
+                name,
+                required: spec.required.unwrap_or(false),
+                kind,
+            });
+        }
+        slots.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(Self {
+            name: raw.name,
+            description: raw.description.unwrap_or_default(),
+            slots,
+        })
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self, TemplateLoadError> {
+        let source = fs::read_to_string(path).map_err(TemplateLoadError::Io)?;
+        Self::from_toml_str(&source)
+    }
+
+    pub fn validation_config<'a>(&self, workspace: Option<&'a Path>) -> ValidationConfig<'a> {
+        let required_slots = self
+            .slots
+            .iter()
+            .filter(|slot| slot.required)
+            .map(|slot| slot.name.clone())
+            .collect();
+        let file_path_slots = self
+            .slots
+            .iter()
+            .filter(|slot| slot.kind == TemplateSlotKind::FilePathList)
+            .map(|slot| slot.name.clone())
+            .collect();
+        ValidationConfig {
+            workspace,
+            required_slots,
+            file_path_slots,
+        }
+    }
+
+    pub fn render_brief(&self) -> String {
+        let required: Vec<&str> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.required)
+            .map(|slot| slot.name.as_str())
+            .collect();
+        let optional: Vec<&str> = self
+            .slots
+            .iter()
+            .filter(|slot| !slot.required)
+            .map(|slot| slot.name.as_str())
+            .collect();
+
+        let mut buf = format!("<CRP_TEMPLATE name=\"{}\">\n", self.name);
+        if !self.description.is_empty() {
+            buf.push_str(&format!("description: {}\n", self.description));
+        }
+        if required.is_empty() {
+            buf.push_str("required: (none)\n");
+        } else {
+            buf.push_str(&format!("required: {}\n", required.join(", ")));
+        }
+        if !optional.is_empty() {
+            buf.push_str(&format!("optional: {}\n", optional.join(", ")));
+        }
+        buf.push_str("</CRP_TEMPLATE>\n");
+        buf
+    }
+}
+
+#[derive(Debug)]
+pub enum TemplateLoadError {
+    Parse(String),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for TemplateLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TemplateLoadError::Parse(message) => write!(f, "{message}"),
+            TemplateLoadError::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl Error for TemplateLoadError {}
+
+#[derive(Debug, Deserialize)]
+struct RawTemplate {
+    name: String,
+    description: Option<String>,
+    #[serde(default)]
+    slots: BTreeMap<String, RawTemplateSlot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTemplateSlot {
+    required: Option<bool>,
+    r#type: Option<String>,
+}
+
+pub fn workspace_template_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".cinto").join("templates")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -775,10 +1051,8 @@ pub fn greet() -> String { "hello".into() }
 
     #[test]
     fn validate_flags_missing_relevant_files_paths() {
-        let workspace = std::env::temp_dir().join(format!(
-            "cinto-crp-validate-test-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("cinto-crp-validate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).expect("create workspace");
         std::fs::write(workspace.join("real.rs"), "// real").expect("write real");
@@ -825,5 +1099,90 @@ pub fn greet() -> String { "hello".into() }
         let retry = build_parse_retry_message(&error);
         assert!(retry.contains("<RETRY_REASON>"));
         assert!(retry.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn code_edit_minimal_template_parses() {
+        let template = Template::from_toml_str(BUILTIN_CODE_EDIT_MINIMAL).expect("minimal parses");
+        assert_eq!(template.name, "code_edit_minimal");
+        let required: Vec<&str> = template
+            .slots
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(required.contains(&"TASK_INTERPRETATION"));
+        assert!(required.contains(&"FINAL_RESPONSE"));
+        assert_eq!(required.len(), 2);
+    }
+
+    #[test]
+    fn code_edit_thorough_template_parses() {
+        let template =
+            Template::from_toml_str(BUILTIN_CODE_EDIT_THOROUGH).expect("thorough parses");
+        assert_eq!(template.name, "code_edit_thorough");
+        let required: Vec<&str> = template
+            .slots
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(required.contains(&"TASK_INTERPRETATION"));
+        assert!(required.contains(&"RELEVANT_FILES"));
+        assert!(required.contains(&"PROPOSED_APPROACH"));
+        assert!(required.contains(&"FILE_EDITS"));
+        assert!(required.contains(&"FINAL_RESPONSE"));
+
+        let optional: Vec<&str> = template
+            .slots
+            .iter()
+            .filter(|s| !s.required)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(optional.contains(&"SELF_VERIFICATION"));
+    }
+
+    #[test]
+    fn effort_qualified_name_maps_correctly() {
+        assert_eq!(
+            effort_qualified_name("code_edit", "none"),
+            Some("code_edit_minimal".to_string())
+        );
+        assert_eq!(
+            effort_qualified_name("code_edit", "low"),
+            Some("code_edit_minimal".to_string())
+        );
+        assert_eq!(effort_qualified_name("code_edit", "medium"), None);
+        assert_eq!(
+            effort_qualified_name("code_edit", "high"),
+            Some("code_edit_thorough".to_string())
+        );
+        // Case-insensitive
+        assert_eq!(
+            effort_qualified_name("code_edit", "HIGH"),
+            Some("code_edit_thorough".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_returns_effort_specific_template() {
+        let set = TemplateSet::builtin();
+        let template = set.resolve("code_edit", "none");
+        assert_eq!(template.name, "code_edit_minimal");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_base_template() {
+        let set = TemplateSet::builtin();
+        let template = set.resolve("code_edit", "medium");
+        assert_eq!(template.name, "code_edit");
+    }
+
+    #[test]
+    fn resolve_falls_back_when_effort_variant_missing() {
+        let set = TemplateSet::builtin();
+        // code_explanation has no _minimal variant
+        let template = set.resolve("code_explanation", "none");
+        assert_eq!(template.name, "code_explanation");
     }
 }

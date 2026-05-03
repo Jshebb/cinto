@@ -1,0 +1,17 @@
+name = "design_proposal"
+description = "Propose a design or architectural approach without producing edits."
+
+[slots.TASK_INTERPRETATION]
+required = true
+
+[slots.PROPOSED_APPROACH]
+required = true
+
+[slots.RISKS]
+required = false
+
+[slots.DELIVERABLE_SPEC]
+required = true
+
+[slots.FINAL_RESPONSE]
+required = true
