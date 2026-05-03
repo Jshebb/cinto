@@ -2,6 +2,7 @@ mod adapter;
 mod batch;
 mod config;
 pub mod crp;
+mod eval_diff;
 mod harmony;
 mod model;
 mod session;
@@ -72,6 +73,13 @@ enum Command {
         )]
         dry_run: bool,
     },
+    #[command(about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements")]
+    EvalDiff {
+        #[arg(help = "Path to the base (control) JSONL file")]
+        base: PathBuf,
+        #[arg(help = "Path to the compare (experiment) JSONL file")]
+        compare: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -104,6 +112,11 @@ async fn main() -> Result<()> {
             dry_run,
         )
         .await?;
+        return Ok(());
+    }
+
+    if let Some(Command::EvalDiff { base, compare }) = args.command {
+        eval_diff::run(base, compare)?;
         return Ok(());
     }
 
