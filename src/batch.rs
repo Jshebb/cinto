@@ -1,6 +1,8 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,14 +19,52 @@ use crate::workspace::clean_workspace;
 struct BatchTask {
     id: String,
     prompt: String,
+    #[serde(default)]
+    fixture_dir: Option<PathBuf>,
+    #[serde(default)]
+    validation_command: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct BatchResult {
-    id: String,
-    trace: String,
+    task_id: String,
+    model: String,
+    crp_enabled: bool,
+    metadata: BatchMetadata,
+    outputs: BatchOutputs,
+    metrics: BatchMetrics,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchMetadata {
+    cinto_version: String,
+    timestamp: u64,
+    temperature: f32,
+    thinking_effort: String,
+    system_prompt: String,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct BatchOutputs {
+    raw_response: String,
+    parsed_successfully: bool,
+    required_slots_present: bool,
+    filepaths_valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    eval_score: Option<String>,
+    code_compiles: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tests_pass: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evaluator_score: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct BatchMetrics {
+    tokens_in: usize,
+    tokens_out: usize,
+    duration_ms: u128,
+    retries: u32,
 }
 
 pub async fn run(
@@ -34,6 +74,7 @@ pub async fn run(
     evaluator_endpoint: Option<String>,
     evaluator_model: Option<String>,
     evaluator_api_key: Option<String>,
+    dry_run: bool,
 ) -> Result<()> {
     let file = std::fs::File::open(&tasks_path)
         .with_context(|| format!("failed to open tasks file {}", tasks_path.display()))?;
@@ -45,7 +86,8 @@ pub async fn run(
         .open(&output_path)
         .with_context(|| format!("failed to open output file {}", output_path.display()))?;
 
-    let evaluator_client = if let Some(endpoint) = evaluator_endpoint {
+    let evaluator_client = if !dry_run && evaluator_endpoint.is_some() {
+        let endpoint = evaluator_endpoint.unwrap();
         let eval_config = ModelConfig {
             endpoint,
             model: evaluator_model.unwrap_or_else(|| "deepseek-chat".to_string()),
@@ -73,6 +115,10 @@ pub async fn run(
         None
     };
 
+    if dry_run {
+        println!("Running in DRY-RUN mode. Models will not be called.");
+    }
+
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -83,13 +129,68 @@ pub async fn run(
             serde_json::from_str(&line).context("failed to parse task JSON line")?;
 
         println!("Running task {}...", task.id);
+        let mut errors = Vec::new();
+        let mut metrics = BatchMetrics::default();
+        let mut outputs = BatchOutputs::default();
 
-        clean_workspace(&config.harness.workspace)?;
+        let mut active_workspace = config.harness.workspace.clone();
+        let mut is_temp_workspace = false;
 
-        let mut session = AgentSession::new(config.clone());
+        if let Some(fixture) = &task.fixture_dir {
+            if !fixture.exists() || !fixture.is_dir() {
+                println!("  Fixture directory not found: {}", fixture.display());
+                errors.push(format!("Fixture not found: {}", fixture.display()));
+                if dry_run { continue; }
+            } else {
+                let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                let temp_dir = std::env::temp_dir().join(format!("cinto-eval-{}-{}", task.id, millis));
+                
+                // Copy fixture to temp
+                let status = Command::new("cp")
+                    .arg("-R")
+                    .arg(fixture)
+                    .arg(&temp_dir)
+                    .status()?;
+                if !status.success() {
+                    println!("  Failed to copy fixture to temp dir.");
+                    errors.push("Failed to copy fixture".to_string());
+                    if dry_run { continue; }
+                } else {
+                    active_workspace = temp_dir.clone();
+                    is_temp_workspace = true;
+
+                    // Initialize git in temp dir
+                    Command::new("git").current_dir(&temp_dir).args(["init"]).output()?;
+                    Command::new("git").current_dir(&temp_dir).args(["add", "."]).output()?;
+                    Command::new("git").current_dir(&temp_dir).args(["commit", "-m", "Initial"]).output()?;
+                }
+            }
+        }
+
+        if dry_run {
+            if is_temp_workspace {
+                println!("  Dry-run: removing temp workspace {}", active_workspace.display());
+                std::fs::remove_dir_all(&active_workspace).ok();
+            }
+            continue;
+        }
+
+        let mut task_config = config.clone();
+        task_config.harness.workspace = active_workspace.clone();
+
+        clean_workspace(&active_workspace).unwrap_or_else(|e| {
+            errors.push(format!("Clean workspace failed: {}", e));
+            String::new()
+        });
+
+        let mut session = AgentSession::new(task_config.clone());
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
         let prompt = task.prompt.clone();
+        
+        metrics.tokens_in = session.estimated_prompt_tokens() + (prompt.len() / 4);
+        let start_time = Instant::now();
+
         let session_handle = tokio::spawn(async move {
             let res = session
                 .send_user_message_streaming(prompt, event_tx.clone())
@@ -100,74 +201,100 @@ pub async fn run(
         while let Some(event) = event_rx.recv().await {
             match event {
                 TurnEvent::ToolApprovalRequested {
-                    recipient,
                     response_tx,
                     ..
                 } => {
-                    println!("  Auto-approving tool: {}", recipient);
                     let _ = response_tx.send(true);
                 }
                 TurnEvent::CrpRetryRequested { attempt, .. } => {
-                    println!("  CRP retry requested (attempt {})", attempt);
-                }
-                TurnEvent::CrpRetryExhausted { .. } => {
-                    println!("  CRP retries exhausted");
-                }
-                TurnEvent::Message(msg) => {
-                    if msg.role == Role::Tool {
-                        println!("  Tool executed: {}", msg.recipient.unwrap_or_default());
-                    }
+                    metrics.retries = attempt;
                 }
                 _ => {}
             }
         }
 
+        metrics.duration_ms = start_time.elapsed().as_millis();
+
         let (session, res) = session_handle.await?;
         if let Err(e) = res {
-            eprintln!("  Session error: {}", e);
-            continue;
+            errors.push(format!("Session error: {}", e));
         }
 
-        let Some(last_msg) = session.history().last() else {
-            println!("  No assistant response generated.");
-            continue;
-        };
+        if let Some(last_msg) = session.history().last() {
+            if last_msg.role == Role::Assistant && last_msg.channel == Some(Channel::Final) {
+                outputs.raw_response = last_msg.content.clone();
+                metrics.tokens_out = outputs.raw_response.len() / 4;
 
-        if last_msg.role != Role::Assistant || last_msg.channel != Some(Channel::Final) {
-            println!("  Last message was not a final assistant response.");
-            continue;
-        }
+                match crp::parse(&outputs.raw_response) {
+                    Ok(trace) => {
+                        outputs.parsed_successfully = true;
 
-        let trace_text = &last_msg.content;
-        let trace = match crp::parse(trace_text) {
-            Ok(t) => t,
-            Err(_) => {
-                println!("  Failed to parse final CRP trace.");
-                continue;
+                        let template_name = session.config().harness.default_template.clone();
+                        let effort = session.config().model.thinking_effort.clone();
+                        let templates = crp::TemplateSet::load(Some(
+                            crp::workspace_template_dir(&session.config().harness.workspace).as_path(),
+                        ));
+                        let active_template = templates.resolve(&template_name, &effort);
+                        let validation_config = active_template.validation_config(Some(active_workspace.as_path()));
+                        let report = crp::validate(&trace, &validation_config);
+                        
+                        let mut required_slots_missing = false;
+                        let mut filepaths_invalid = false;
+                        for outcome in &report.outcomes {
+                            if outcome.status == crp::SlotStatus::Invalid {
+                                if outcome.message.contains("Required slot") {
+                                    required_slots_missing = true;
+                                }
+                                if outcome.message.contains("Path(s) listed in") {
+                                    filepaths_invalid = true;
+                                }
+                            }
+                        }
+                        
+                        outputs.required_slots_present = !required_slots_missing;
+                        outputs.filepaths_valid = !filepaths_invalid;
+
+                        if !report.is_executable() {
+                            errors.push("Trace failed semantic validation (slots or files missing).".to_string());
+                        } else {
+                            // Syntactically and statically valid. Let's check semantic tests if requested.
+                            if let Some(cmd) = &task.validation_command {
+                                // Run the validation command in the active workspace
+                                let args: Vec<&str> = cmd.split_whitespace().collect();
+                                if !args.is_empty() {
+                                    let mut command = Command::new(args[0]);
+                                    if args.len() > 1 {
+                                        command.args(&args[1..]);
+                                    }
+                                    command.current_dir(&active_workspace);
+                                    if let Ok(output) = command.output() {
+                                        outputs.tests_pass = Some(output.status.success());
+                                        outputs.code_compiles = Some(true); // Assuming tests compiled
+                                    } else {
+                                        outputs.tests_pass = Some(false);
+                                        errors.push(format!("Failed to execute validation command: {}", cmd));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("CRP parse error: {}", e));
+                    }
+                }
+            } else {
+                errors.push("Last message was not a final assistant response.".to_string());
             }
-        };
-
-        let template = session.config().harness.default_template.clone();
-        let effort = session.config().model.thinking_effort.clone();
-        let templates = crp::TemplateSet::load(Some(
-            crp::workspace_template_dir(&session.config().harness.workspace).as_path(),
-        ));
-        let active_template = templates.resolve(&template, &effort);
-        let validation_config =
-            active_template.validation_config(Some(session.config().harness.workspace.as_path()));
-        let report = crp::validate(&trace, &validation_config);
-
-        if !report.is_executable() {
-            println!("  Trace failed syntactic validation.");
-            continue;
+        } else {
+            errors.push("No assistant response generated.".to_string());
         }
 
-        let mut eval_score = None;
-        if let Some(eval_client) = &evaluator_client {
-            println!("  Running evaluator...");
+        // Run evaluator judge if we parsed successfully and have an evaluator
+        if outputs.parsed_successfully && evaluator_client.is_some() {
+            let eval_client = evaluator_client.as_ref().unwrap();
             let eval_prompt = format!(
                 "Task: {}\n\nTrace:\n{}\n\nDid this trace successfully accomplish the task? Output ONLY <EVALUATOR_PASS> or <EVALUATOR_FAIL>.",
-                task.prompt, trace_text
+                task.prompt, outputs.raw_response
             );
             let payload = ChatRequestPayload {
                 mode: RequestMode::OpenAiChat {
@@ -184,33 +311,43 @@ pub async fn run(
             match eval_client.complete(payload).await {
                 Ok(res) => {
                     let score = res.text.trim();
-                    eval_score = Some(score.to_string());
-                    if !score.contains("<EVALUATOR_PASS>") {
-                        println!("  Evaluator failed the trace: {}", score);
-                        continue;
-                    }
+                    outputs.evaluator_score = Some(score.to_string());
                 }
                 Err(e) => {
-                    eprintln!("  Evaluator error: {}", e);
-                    continue;
+                    errors.push(format!("Evaluator error: {}", e));
                 }
             }
         }
 
-        println!("  Success. Saving trace.");
         let result = BatchResult {
-            id: task.id,
-            trace: trace_text.clone(),
-            eval_score,
+            task_id: task.id.clone(),
+            model: config.model.model.clone(),
+            crp_enabled: config.harness.reasoning_protocol.eq_ignore_ascii_case("crp"),
+            metadata: BatchMetadata {
+                cinto_version: env!("CARGO_PKG_VERSION").to_string(),
+                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                temperature: config.model.temperature,
+                thinking_effort: config.model.thinking_effort.clone(),
+                system_prompt: config.harness.system_prompt.clone(),
+            },
+            outputs,
+            metrics,
+            errors,
         };
 
         let json = serde_json::to_string(&result)?;
         writeln!(output_file, "{}", json)?;
         output_file.flush()?;
 
-        clean_workspace(&config.harness.workspace)?;
+        if is_temp_workspace {
+            std::fs::remove_dir_all(&active_workspace).ok();
+        } else {
+            clean_workspace(&active_workspace).ok();
+        }
     }
 
-    println!("Batch complete.");
+    if !dry_run {
+        println!("Batch complete.");
+    }
     Ok(())
 }
