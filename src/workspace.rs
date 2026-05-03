@@ -221,6 +221,13 @@ pub fn path_suggestions(workspace: &Path, prefix: &str, limit: usize) -> Result<
     Ok(suggestions)
 }
 
+pub fn clean_workspace(workspace: &Path) -> Result<String> {
+    ensure_git_workspace(workspace)?;
+    git_output(workspace, &["reset", "--hard", "HEAD"])?;
+    git_output(workspace, &["clean", "-fd"])?;
+    Ok("Workspace restored to a clean state.".to_string())
+}
+
 fn ensure_git_workspace(workspace: &Path) -> Result<()> {
     let output = Command::new("git")
         .current_dir(workspace)
