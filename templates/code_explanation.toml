@@ -1,0 +1,12 @@
+name = "code_explanation"
+description = "Explain or describe existing code without modifying it."
+
+[slots.TASK_INTERPRETATION]
+required = true
+
+[slots.RELEVANT_FILES]
+required = false
+type = "BulletList<FilePath>"
+
+[slots.FINAL_RESPONSE]
+required = true

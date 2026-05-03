@@ -120,6 +120,7 @@ pub struct AgentSession {
     config: Config,
     adapter: Box<dyn PromptAdapter>,
     client: ModelClient,
+    templates: crp::TemplateSet,
     history: Vec<Message>,
     todos: Vec<TodoItem>,
 }
@@ -133,11 +134,15 @@ impl AgentSession {
             fallback_adapter(&config)
         });
         let client = ModelClient::new(config.model.clone());
+        let templates = crp::TemplateSet::load(Some(
+            crp::workspace_template_dir(&config.harness.workspace).as_path(),
+        ));
 
         Self {
             config,
             adapter,
             client,
+            templates,
             history: Vec::new(),
             todos: Vec::new(),
         }
@@ -160,6 +165,9 @@ impl AgentSession {
             fallback_adapter(&config)
         });
         self.client = ModelClient::new(config.model.clone());
+        self.templates = crp::TemplateSet::load(Some(
+            crp::workspace_template_dir(&config.harness.workspace).as_path(),
+        ));
         self.config = config;
     }
 
@@ -339,10 +347,11 @@ impl AgentSession {
         event_tx: &UnboundedSender<TurnEvent>,
     ) -> bool {
         let workspace = self.config.harness.workspace.clone();
-        let config = crp::ValidationConfig {
-            workspace: Some(workspace.as_path()),
-            ..crp::ValidationConfig::default()
-        };
+        let template = self.templates.resolve(
+            &self.config.harness.default_template,
+            &self.config.model.thinking_effort,
+        );
+        let config = template.validation_config(Some(workspace.as_path()));
 
         let (retry_message, invalid_slots, parse_error) = match crp::parse(text) {
             Ok(trace) => {
@@ -831,9 +840,57 @@ fn summarize_message(message: &Message) -> String {
         .map(clean_recipient)
         .map(|value| format!(" to {value}"))
         .unwrap_or_default();
-    let content = compact_inline(&message.content, 240);
 
+    // For assistant final messages, try to extract structured CRP slot summaries
+    // instead of blindly truncating the entire trace.
+    if message.role == Role::Assistant && message.channel == Some(Channel::Final) {
+        if let Ok(trace) = crp::parse(&message.content) {
+            return summarize_crp_trace(&trace, role, channel, &recipient);
+        }
+    }
+
+    let content = compact_inline(&message.content, 240);
     format!("{role}{channel}{recipient}: {content}")
+}
+
+fn summarize_crp_trace(trace: &crp::Trace, role: &str, channel: &str, recipient: &str) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(task) = trace.get("TASK_INTERPRETATION") {
+        parts.push(format!("task: {}", compact_inline(&task.content, 120)));
+    }
+    if let Some(response) = trace.get("FINAL_RESPONSE") {
+        parts.push(format!(
+            "response: {}",
+            compact_inline(&response.content, 200)
+        ));
+    }
+
+    let other_slots: Vec<&str> = trace
+        .slots
+        .iter()
+        .filter(|s| s.name != "TASK_INTERPRETATION" && s.name != "FINAL_RESPONSE")
+        .map(|s| s.name.as_str())
+        .collect();
+    if !other_slots.is_empty() {
+        parts.push(format!("also emitted: {}", other_slots.join(", ")));
+    }
+
+    if parts.is_empty() {
+        return format!(
+            "{role}{channel}{recipient}: {}",
+            compact_inline(
+                &trace
+                    .slots
+                    .first()
+                    .map(|s| s.content.as_str())
+                    .unwrap_or("(empty CRP trace)"),
+                240
+            )
+        );
+    }
+
+    format!("{role}{channel}{recipient}: {}", parts.join(" | "))
 }
 
 fn compact_inline(value: &str, max_chars: usize) -> String {
@@ -1217,12 +1274,21 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut retries = 0u32;
 
-        let retried = session.handle_crp_validation(
-            "<FINAL_RESPONSE>All good.</FINAL_RESPONSE>",
-            &mut retries,
-            3,
-            &tx,
-        );
+        let trace = "\
+<TASK_INTERPRETATION>test</TASK_INTERPRETATION>
+<RELEVANT_FILES>
+- Cargo.toml
+</RELEVANT_FILES>
+<PROPOSED_APPROACH>
+- do it
+</PROPOSED_APPROACH>
+<FILE_EDITS>
+@@ Cargo.toml prepend
+fn hello() {}
+</FILE_EDITS>
+<FINAL_RESPONSE>All good.</FINAL_RESPONSE>";
+
+        let retried = session.handle_crp_validation(trace, &mut retries, 3, &tx);
 
         assert!(!retried);
         assert_eq!(retries, 0);
@@ -1262,7 +1328,7 @@ mod tests {
             } => {
                 assert_eq!(attempt, 1);
                 assert_eq!(budget, 3);
-                assert_eq!(invalid_slots, vec!["FINAL_RESPONSE".to_string()]);
+                assert!(invalid_slots.contains(&"FINAL_RESPONSE".to_string()));
                 assert!(parse_error.is_none());
             }
             other => panic!("unexpected event: {other:?}"),
@@ -1293,7 +1359,7 @@ mod tests {
                 invalid_slots,
             } => {
                 assert_eq!(budget, 3);
-                assert_eq!(invalid_slots, vec!["FINAL_RESPONSE".to_string()]);
+                assert!(invalid_slots.contains(&"FINAL_RESPONSE".to_string()));
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1317,5 +1383,53 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn summarize_message_extracts_crp_slots() {
+        let msg = Message {
+            role: Role::Assistant,
+            channel: Some(Channel::Final),
+            content: "<TASK_INTERPRETATION>Fix the bug in parser</TASK_INTERPRETATION>\n<PROPOSED_APPROACH>\n- Step one\n</PROPOSED_APPROACH>\n<FINAL_RESPONSE>Done, the parser now handles edge cases.</FINAL_RESPONSE>".to_string(),
+            recipient: None,
+        };
+
+        let summary = summarize_message(&msg);
+
+        assert!(summary.starts_with("assistant final:"));
+        assert!(summary.contains("task: Fix the bug in parser"));
+        assert!(summary.contains("response: Done, the parser now handles edge cases."));
+        assert!(summary.contains("also emitted: PROPOSED_APPROACH"));
+        // Should NOT contain the full PROPOSED_APPROACH content
+        assert!(!summary.contains("Step one"));
+    }
+
+    #[test]
+    fn summarize_message_falls_back_for_non_crp() {
+        let msg = Message {
+            role: Role::Assistant,
+            channel: Some(Channel::Final),
+            content: "Just a plain text answer without CRP slots.".to_string(),
+            recipient: None,
+        };
+
+        let summary = summarize_message(&msg);
+
+        assert!(summary.starts_with("assistant final:"));
+        assert!(summary.contains("Just a plain text answer"));
+    }
+
+    #[test]
+    fn summarize_message_user_messages_unchanged() {
+        let msg = Message {
+            role: Role::User,
+            channel: None,
+            content: "Please fix the bug.".to_string(),
+            recipient: None,
+        };
+
+        let summary = summarize_message(&msg);
+
+        assert_eq!(summary, "user: Please fix the bug.");
     }
 }
