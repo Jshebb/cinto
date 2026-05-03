@@ -75,6 +75,11 @@ enum Command {
             help = "Validate the JSONL and fixtures without calling the model"
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            help = "DANGEROUS: Automatically approve all tool executions (including shell commands). Only use in an isolated VM or Docker container!"
+        )]
+        dangerously_auto_approve: bool,
     },
     #[command(about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements")]
     EvalDiff {
@@ -103,6 +108,7 @@ async fn main() -> Result<()> {
         evaluator_model,
         evaluator_api_key,
         dry_run,
+        dangerously_auto_approve,
     }) = args.command
     {
         batch::run(
@@ -113,6 +119,7 @@ async fn main() -> Result<()> {
             evaluator_model,
             evaluator_api_key,
             dry_run,
+            dangerously_auto_approve,
         )
         .await?;
         return Ok(());
