@@ -183,6 +183,10 @@ impl AgentSession {
         self.history.len()
     }
 
+    pub fn history(&self) -> &[Message] {
+        &self.history
+    }
+
     pub fn tool_details(&self) -> String {
         self.adapter.tool_details()
     }
