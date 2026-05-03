@@ -75,7 +75,15 @@ pub async fn run(
     evaluator_model: Option<String>,
     evaluator_api_key: Option<String>,
     dry_run: bool,
+    dangerously_auto_approve: bool,
 ) -> Result<()> {
+    if !dry_run && !dangerously_auto_approve {
+        anyhow::bail!(
+            "FATAL SECURITY RISK: Running batch mode will automatically execute AI-generated code and shell commands on your host system. \
+            This can result in data loss or system compromise.\n\
+            You must run this in an isolated VM or Docker container and pass the --dangerously-auto-approve flag to confirm you understand the risks."
+        );
+    }
     let file = std::fs::File::open(&tasks_path)
         .with_context(|| format!("failed to open tasks file {}", tasks_path.display()))?;
     let reader = BufReader::new(file);
