@@ -235,6 +235,16 @@ impl TemplateSet {
         set
     }
 
+    pub fn dump_builtins(dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("code_edit.toml"), BUILTIN_CODE_EDIT)?;
+        std::fs::write(dir.join("code_edit_minimal.toml"), BUILTIN_CODE_EDIT_MINIMAL)?;
+        std::fs::write(dir.join("code_edit_thorough.toml"), BUILTIN_CODE_EDIT_THOROUGH)?;
+        std::fs::write(dir.join("code_explanation.toml"), BUILTIN_CODE_EXPLANATION)?;
+        std::fs::write(dir.join("design_proposal.toml"), BUILTIN_DESIGN_PROPOSAL)?;
+        Ok(())
+    }
+
     pub fn load(workspace_overlay: Option<&Path>) -> Self {
         let mut set = Self::builtin();
         if let Some(dir) = workspace_overlay

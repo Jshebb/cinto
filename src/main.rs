@@ -4,6 +4,7 @@ mod config;
 pub mod crp;
 mod eval_diff;
 mod harmony;
+mod init;
 mod model;
 mod session;
 mod theme;
@@ -44,6 +45,8 @@ struct Args {
 enum Command {
     #[command(about = "Open the initial setup TUI")]
     Setup,
+    #[command(about = "Initialize .cinto/templates in the current workspace")]
+    Init,
     #[command(about = "Remove the installed cinto binary")]
     Uninstall {
         #[arg(long, help = "Remove ~/.config/cinto after removing the binary")]
@@ -117,6 +120,12 @@ async fn main() -> Result<()> {
 
     if let Some(Command::EvalDiff { base, compare }) = args.command {
         eval_diff::run(base, compare)?;
+        return Ok(());
+    }
+
+    if let Some(Command::Init) = args.command {
+        let config = Config::load(args.config)?;
+        init::run(&config)?;
         return Ok(());
     }
 

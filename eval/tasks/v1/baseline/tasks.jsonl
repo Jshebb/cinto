@@ -1,0 +1,5 @@
+{"id": "refactor_01", "prompt": "The process_data function in src/lib.rs is too long. Extract the average calculation into a separate helper function called calculate_average.", "fixture_dir": "eval/tasks/v1/baseline/refactor_01/initial", "validation_command": "cargo test"}
+{"id": "feature_01", "prompt": "The User struct in src/lib.rs needs a getter method for the username. Add a method `pub fn username(&self) -> &str`.", "fixture_dir": "eval/tasks/v1/baseline/feature_01/initial", "validation_command": "cargo test"}
+{"id": "bugfix_01", "prompt": "There is an out-of-bounds bug in the find_max function in src/lib.rs. Fix it so the test passes.", "fixture_dir": "eval/tasks/v1/baseline/bugfix_01/initial", "validation_command": "cargo test"}
+{"id": "bugfix_02", "prompt": "The get_first_char function panics on empty strings and None values. Make it return '\\0' instead of panicking.", "fixture_dir": "eval/tasks/v1/baseline/bugfix_02/initial", "validation_command": "cargo test"}
+{"id": "edge_01", "prompt": "Fix the syntax error in src/lib.rs.", "fixture_dir": "eval/tasks/v1/baseline/edge_01/initial", "validation_command": "cargo check"}
