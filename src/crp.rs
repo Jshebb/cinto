@@ -22,6 +22,7 @@ pub fn default_file_path_slots() -> Vec<String> {
 pub struct ValidationConfig<'a> {
     pub workspace: Option<&'a Path>,
     pub required_slots: Vec<String>,
+    pub hard_required_slots: Vec<String>,
     pub file_path_slots: Vec<String>,
 }
 
@@ -30,6 +31,7 @@ impl Default for ValidationConfig<'_> {
         Self {
             workspace: None,
             required_slots: default_required_slots(),
+            hard_required_slots: default_required_slots(),
             file_path_slots: default_file_path_slots(),
         }
     }
@@ -79,20 +81,25 @@ pub fn validate(trace: &Trace, config: &ValidationConfig<'_>) -> ValidationRepor
     let mut outcomes = Vec::new();
 
     for required in &config.required_slots {
+        let hard_required = config
+            .hard_required_slots
+            .iter()
+            .any(|slot| slot == required);
+        let status = if hard_required {
+            SlotStatus::Invalid
+        } else {
+            SlotStatus::Warning
+        };
         match trace.get(required.as_str()) {
             None => outcomes.push(SlotOutcome {
                 slot: required.clone(),
-                status: SlotStatus::Invalid,
-                message: format!(
-                    "Required slot <{required}> is missing. Emit it with non-empty content."
-                ),
+                status,
+                message: missing_slot_message(required, hard_required),
             }),
             Some(slot) if slot.content.trim().is_empty() => outcomes.push(SlotOutcome {
                 slot: required.clone(),
-                status: SlotStatus::Invalid,
-                message: format!(
-                    "Required slot <{required}> is present but empty. Provide concrete content."
-                ),
+                status,
+                message: empty_slot_message(required, hard_required),
             }),
             Some(_) => {}
         }
@@ -122,6 +129,26 @@ pub fn validate(trace: &Trace, config: &ValidationConfig<'_>) -> ValidationRepor
     }
 
     ValidationReport { outcomes }
+}
+
+fn missing_slot_message(slot: &str, hard_required: bool) -> String {
+    if hard_required {
+        format!("Required slot <{slot}> is missing. Emit it with non-empty content.")
+    } else {
+        format!(
+            "Recommended slot <{slot}> is missing. Emit it when it helps make the trace auditable."
+        )
+    }
+}
+
+fn empty_slot_message(slot: &str, hard_required: bool) -> String {
+    if hard_required {
+        format!("Required slot <{slot}> is present but empty. Provide concrete content.")
+    } else {
+        format!(
+            "Recommended slot <{slot}> is present but empty. Provide concrete content or omit it."
+        )
+    }
 }
 
 pub fn build_retry_message(report: &ValidationReport) -> String {
@@ -238,8 +265,14 @@ impl TemplateSet {
     pub fn dump_builtins(dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         std::fs::write(dir.join("code_edit.toml"), BUILTIN_CODE_EDIT)?;
-        std::fs::write(dir.join("code_edit_minimal.toml"), BUILTIN_CODE_EDIT_MINIMAL)?;
-        std::fs::write(dir.join("code_edit_thorough.toml"), BUILTIN_CODE_EDIT_THOROUGH)?;
+        std::fs::write(
+            dir.join("code_edit_minimal.toml"),
+            BUILTIN_CODE_EDIT_MINIMAL,
+        )?;
+        std::fs::write(
+            dir.join("code_edit_thorough.toml"),
+            BUILTIN_CODE_EDIT_THOROUGH,
+        )?;
         std::fs::write(dir.join("code_explanation.toml"), BUILTIN_CODE_EXPLANATION)?;
         std::fs::write(dir.join("design_proposal.toml"), BUILTIN_DESIGN_PROPOSAL)?;
         Ok(())
@@ -372,6 +405,12 @@ impl Template {
             .filter(|slot| slot.required)
             .map(|slot| slot.name.clone())
             .collect();
+        let hard_required_slots = self
+            .slots
+            .iter()
+            .filter(|slot| slot.required && slot.name == "FINAL_RESPONSE")
+            .map(|slot| slot.name.clone())
+            .collect();
         let file_path_slots = self
             .slots
             .iter()
@@ -381,15 +420,22 @@ impl Template {
         ValidationConfig {
             workspace,
             required_slots,
+            hard_required_slots,
             file_path_slots,
         }
     }
 
     pub fn render_brief(&self) -> String {
-        let required: Vec<&str> = self
+        let hard_required: Vec<&str> = self
             .slots
             .iter()
-            .filter(|slot| slot.required)
+            .filter(|slot| slot.required && slot.name == "FINAL_RESPONSE")
+            .map(|slot| slot.name.as_str())
+            .collect();
+        let recommended: Vec<&str> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.required && slot.name != "FINAL_RESPONSE")
             .map(|slot| slot.name.as_str())
             .collect();
         let optional: Vec<&str> = self
@@ -403,10 +449,13 @@ impl Template {
         if !self.description.is_empty() {
             buf.push_str(&format!("description: {}\n", self.description));
         }
-        if required.is_empty() {
-            buf.push_str("required: (none)\n");
+        if hard_required.is_empty() {
+            buf.push_str("hard_required: (none)\n");
         } else {
-            buf.push_str(&format!("required: {}\n", required.join(", ")));
+            buf.push_str(&format!("hard_required: {}\n", hard_required.join(", ")));
+        }
+        if !recommended.is_empty() {
+            buf.push_str(&format!("recommended: {}\n", recommended.join(", ")));
         }
         if !optional.is_empty() {
             buf.push_str(&format!("optional: {}\n", optional.join(", ")));
@@ -1060,6 +1109,30 @@ pub fn greet() -> String { "hello".into() }
     }
 
     #[test]
+    fn validate_warns_for_missing_recommended_template_slots() {
+        let templates = TemplateSet::builtin();
+        let template = templates.select("code_edit");
+        let config = template.validation_config(None);
+        let trace = parse("<FINAL_RESPONSE>Done.</FINAL_RESPONSE>").expect("parse");
+
+        let report = validate(&trace, &config);
+
+        assert!(report.is_executable());
+        assert_eq!(report.invalid().count(), 0);
+        let warnings: Vec<_> = report.warnings().collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|outcome| outcome.slot == "TASK_INTERPRETATION")
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|outcome| outcome.slot == "RELEVANT_FILES")
+        );
+    }
+
+    #[test]
     fn validate_flags_missing_relevant_files_paths() {
         let workspace =
             std::env::temp_dir().join(format!("cinto-crp-validate-test-{}", std::process::id()));
@@ -1150,6 +1223,17 @@ pub fn greet() -> String { "hello".into() }
             .map(|s| s.name.as_str())
             .collect();
         assert!(optional.contains(&"SELF_VERIFICATION"));
+    }
+
+    #[test]
+    fn template_brief_distinguishes_hard_required_from_recommended() {
+        let template = Template::from_toml_str(BUILTIN_CODE_EDIT).expect("parse template");
+        let brief = template.render_brief();
+
+        assert!(brief.contains("hard_required: FINAL_RESPONSE"));
+        assert!(brief.contains("recommended:"));
+        assert!(brief.contains("TASK_INTERPRETATION"));
+        assert!(brief.contains("RELEVANT_FILES"));
     }
 
     #[test]

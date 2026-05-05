@@ -155,6 +155,8 @@ When you need workspace context or an action, use the tool-calling format made a
 
 When you are ready to answer the user, the final answer must contain only a complete CRP trace. Use uppercase XML-like slots and do not write prose outside CRP slots.
 
+The harness treats <FINAL_RESPONSE> as hard-required. Other template slots are recommended structure: include them when useful, and keep their typed content valid when present.
+
 Use these standard slots when applicable:
 
 <TASK_INTERPRETATION>
