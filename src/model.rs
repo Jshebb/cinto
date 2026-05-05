@@ -28,6 +28,64 @@ impl ModelClient {
         Self { http, config }
     }
 
+    pub async fn detect_context_window(&self) -> Result<Option<u32>> {
+        let base_endpoint = model_base_endpoint(&self.config.endpoint);
+        for endpoint in [
+            format!("{base_endpoint}/v1/models"),
+            format!("{base_endpoint}/api/v0/models"),
+        ] {
+            if let Some(context_window) =
+                self.detect_context_from_models_endpoint(&endpoint).await?
+            {
+                return Ok(Some(context_window));
+            }
+        }
+
+        self.detect_context_from_ollama_show(&base_endpoint).await
+    }
+
+    async fn detect_context_from_models_endpoint(&self, endpoint: &str) -> Result<Option<u32>> {
+        let response = match self.authorize(self.http.get(endpoint)).send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to decode models response")?;
+        let Some(model) = select_model_info(&body, &self.config.model) else {
+            return Ok(None);
+        };
+        Ok(extract_context_window(model))
+    }
+
+    async fn detect_context_from_ollama_show(&self, base_endpoint: &str) -> Result<Option<u32>> {
+        let endpoint = format!("{base_endpoint}/api/show");
+        let request = serde_json::json!({ "model": &self.config.model });
+        let response = match self
+            .authorize(self.http.post(&endpoint))
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to decode Ollama model response")?;
+        Ok(extract_context_window(&body))
+    }
+
     pub async fn complete(&self, payload: ChatRequestPayload) -> Result<CompletionResult> {
         let endpoint = normalize_endpoint(&self.config.endpoint, &payload.mode);
         match payload.mode {
@@ -217,6 +275,88 @@ impl ModelClient {
             Some(value.to_string())
         }
     }
+}
+
+fn model_base_endpoint(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/v1/chat/completions")
+        .trim_end_matches("/v1/completions")
+        .trim_end_matches("/v1")
+        .to_string()
+}
+
+fn select_model_info<'a>(
+    body: &'a serde_json::Value,
+    configured_model: &str,
+) -> Option<&'a serde_json::Value> {
+    let models = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| body.as_array())?;
+    models
+        .iter()
+        .find(|model| {
+            model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id == configured_model)
+        })
+        .or_else(|| {
+            if models.len() == 1 {
+                models.first()
+            } else {
+                None
+            }
+        })
+}
+
+fn extract_context_window(model: &serde_json::Value) -> Option<u32> {
+    const CONTEXT_FIELDS: &[&str] = &[
+        "context_length",
+        "context_window",
+        "max_context_length",
+        "max_model_len",
+        "max_sequence_length",
+        "max_position_embeddings",
+        "input_token_limit",
+        "n_ctx",
+        "num_ctx",
+    ];
+    const CONTAINERS: &[&str] = &["metadata", "config", "details", "model_info", "parameters"];
+
+    find_context_field(model, CONTEXT_FIELDS).or_else(|| {
+        CONTAINERS.iter().find_map(|container| {
+            model
+                .get(*container)
+                .and_then(|value| find_context_field(value, CONTEXT_FIELDS))
+        })
+    })
+}
+
+fn find_context_field(value: &serde_json::Value, fields: &[&str]) -> Option<u32> {
+    let object = value.as_object()?;
+    object.iter().find_map(|(key, value)| {
+        let matches_field = fields.iter().any(|field| {
+            key == field
+                || key
+                    .strip_suffix(field)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        });
+        matches_field
+            .then_some(value)
+            .and_then(context_value_as_u32)
+    })
+}
+
+fn context_value_as_u32(value: &serde_json::Value) -> Option<u32> {
+    let raw = value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    })?;
+    u32::try_from(raw).ok().filter(|tokens| *tokens > 0)
 }
 
 async fn require_success(response: reqwest::Response, endpoint: &str) -> Result<reqwest::Response> {
@@ -494,5 +634,49 @@ mod tests {
             normalize_endpoint("http://127.0.0.1:1234/v1/completions", &mode),
             "http://127.0.0.1:1234/v1/completions"
         );
+    }
+
+    #[test]
+    fn extracts_context_window_from_common_model_fields() {
+        let model = serde_json::json!({
+            "id": "qwen",
+            "metadata": {
+                "max_model_len": 131072
+            }
+        });
+
+        assert_eq!(extract_context_window(&model), Some(131072));
+    }
+
+    #[test]
+    fn extracts_namespaced_ollama_context_window() {
+        let model = serde_json::json!({
+            "model_info": {
+                "llama.context_length": 98304
+            }
+        });
+
+        assert_eq!(extract_context_window(&model), Some(98304));
+    }
+
+    #[test]
+    fn selects_exact_model_or_single_available_model() {
+        let body = serde_json::json!({
+            "data": [
+                { "id": "a", "context_length": 8192 },
+                { "id": "b", "context_length": 65536 }
+            ]
+        });
+
+        let selected = select_model_info(&body, "b").expect("model b");
+        assert_eq!(extract_context_window(selected), Some(65536));
+
+        let single = serde_json::json!({
+            "data": [
+                { "id": "served-model", "num_ctx": "32768" }
+            ]
+        });
+        let selected = select_model_info(&single, "configured-alias").expect("single model");
+        assert_eq!(extract_context_window(selected), Some(32768));
     }
 }

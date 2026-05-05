@@ -187,6 +187,18 @@ impl AgentSession {
         &self.history
     }
 
+    pub fn discard_trailing_user_message(&mut self) -> bool {
+        if self
+            .history
+            .last()
+            .is_some_and(|message| message.role == Role::User)
+        {
+            self.history.pop();
+            return true;
+        }
+        false
+    }
+
     pub fn tool_details(&self) -> String {
         self.adapter.tool_details()
     }
@@ -1034,6 +1046,21 @@ fn clean_recipient(recipient: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discard_trailing_user_message_only_removes_unanswered_user() {
+        let mut session = AgentSession::new(Config::default());
+        session.history.push(Message::user("cancel me"));
+
+        assert!(session.discard_trailing_user_message());
+        assert!(session.history().is_empty());
+
+        session
+            .history
+            .push(Message::assistant_final("keep assistant"));
+        assert!(!session.discard_trailing_user_message());
+        assert_eq!(session.history().len(), 1);
+    }
 
     #[test]
     fn write_file_creates_nested_workspace_file() {

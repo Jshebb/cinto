@@ -256,7 +256,7 @@ impl App {
         let (title, mut content, style) = match self.view {
             View::Chat if self.is_busy() => (
                 " Input ",
-                vec![Line::raw("model is working; scroll remains available")],
+                vec![Line::raw("model is working; Esc or Ctrl-C interrupts")],
                 self.theme.dim_style(),
             ),
             View::Chat => (
@@ -366,6 +366,9 @@ impl App {
         status_spans.push(Span::styled("Keys ", Style::default().fg(self.theme.muted)));
         let keys = match self.view {
             View::Setup => "Enter edit/apply  Space toggle  Esc skip  Ctrl-C quit",
+            View::Chat | View::Settings if self.is_busy() => {
+                "Esc/Ctrl-C interrupt  PgUp/PgDn scroll"
+            }
             View::Chat | View::Settings => {
                 "F2 settings  F3 sidebar  F4 header  PgUp/PgDn scroll  Ctrl-C quit"
             }
