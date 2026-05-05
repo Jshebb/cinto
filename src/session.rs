@@ -77,6 +77,13 @@ pub enum TurnEvent {
     Message(Message),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrpValidationDecision {
+    Accept,
+    RetryQueued,
+    Exhausted,
+}
+
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -277,15 +284,17 @@ impl AgentSession {
                                     });
                                     return Ok(());
                                 }
-                                if crp_enabled
-                                    && self.handle_crp_validation(
+                                if crp_enabled {
+                                    match self.handle_crp_validation(
                                         &text,
                                         &mut crp_retries_used,
                                         crp_budget,
                                         &event_tx,
-                                    )
-                                {
-                                    break;
+                                    ) {
+                                        CrpValidationDecision::Accept => {}
+                                        CrpValidationDecision::RetryQueued => break,
+                                        CrpValidationDecision::Exhausted => {}
+                                    }
                                 }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
@@ -323,15 +332,17 @@ impl AgentSession {
                                     });
                                     return Ok(());
                                 }
-                                if crp_enabled
-                                    && self.handle_crp_validation(
+                                if crp_enabled {
+                                    match self.handle_crp_validation(
                                         &text,
                                         &mut crp_retries_used,
                                         crp_budget,
                                         &event_tx,
-                                    )
-                                {
-                                    break;
+                                    ) {
+                                        CrpValidationDecision::Accept => {}
+                                        CrpValidationDecision::RetryQueued => break,
+                                        CrpValidationDecision::Exhausted => {}
+                                    }
                                 }
                                 let message = Message::assistant_final(text);
                                 self.history.push(message.clone());
@@ -361,7 +372,7 @@ impl AgentSession {
         retries_used: &mut u32,
         budget: u32,
         event_tx: &UnboundedSender<TurnEvent>,
-    ) -> bool {
+    ) -> CrpValidationDecision {
         let workspace = self.config.harness.workspace.clone();
         let template = self.templates.resolve(
             &self.config.harness.default_template,
@@ -373,7 +384,7 @@ impl AgentSession {
             Ok(trace) => {
                 let report = crp::validate(&trace, &config);
                 if report.is_executable() {
-                    return false;
+                    return CrpValidationDecision::Accept;
                 }
                 let invalid: Vec<String> = report
                     .invalid()
@@ -393,7 +404,7 @@ impl AgentSession {
                 budget,
                 invalid_slots,
             });
-            return false;
+            return CrpValidationDecision::Exhausted;
         }
 
         *retries_used += 1;
@@ -409,7 +420,7 @@ impl AgentSession {
             invalid_slots,
             parse_error,
         });
-        true
+        CrpValidationDecision::RetryQueued
     }
 
     fn compact_context_if_needed(&mut self) -> Option<TurnEvent> {
