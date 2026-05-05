@@ -9,7 +9,10 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::config::{self, PRESETS};
+use crate::{
+    config::{self, PRESETS},
+    model::ModelClient,
+};
 
 use super::{
     App, StatusKind, View,
@@ -230,6 +233,32 @@ impl App {
     }
 
     fn finish_setup(&mut self) -> Result<()> {
+        let old_window = self.config.model.context_window;
+        let detected_ctx = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let client = ModelClient::new(self.config.model.clone());
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    client.detect_context_window(),
+                )
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .flatten()
+            })
+        });
+
+        if let Some(detected_window) = detected_ctx
+            && detected_window > 0
+            && detected_window != old_window
+        {
+            self.config.model.context_window = detected_window;
+            self.append_system(
+                "Context Detection",
+                format!("Updated context window from {old_window} to {detected_window} tokens."),
+            );
+        }
+
         let path = self
             .config
             .save(self.config_path.clone())

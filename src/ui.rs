@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -21,6 +21,7 @@ use tokio::{
 
 use crate::{
     config::Config,
+    model::ModelClient,
     session::{AgentSession, Channel, Role, TurnEvent},
     theme::{StatusKind, Theme},
     workspace,
@@ -51,6 +52,7 @@ enum View {
 }
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
+const TURN_INTERRUPTED: &str = "turn interrupted";
 
 struct PendingToolApproval {
     recipient: String,
@@ -90,6 +92,7 @@ pub struct App {
     follow_tail: bool,
     spinner_tick: u64,
     send_task: Option<TurnTask>,
+    cancel_tx: Option<oneshot::Sender<()>>,
     stream_rx: Option<UnboundedReceiver<TurnEvent>>,
     stream_item_index: Option<usize>,
     pending_tool_approval: Option<PendingToolApproval>,
@@ -140,6 +143,7 @@ impl App {
             follow_tail: true,
             spinner_tick: 0,
             send_task: None,
+            cancel_tx: None,
             stream_rx: None,
             stream_item_index: None,
             pending_tool_approval: None,
@@ -213,6 +217,10 @@ impl App {
                 }
 
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if self.is_busy() {
+                        self.interrupt_turn();
+                        continue;
+                    }
                     return Ok(());
                 }
                 if self.handle_approval_key(key.code) {
@@ -255,8 +263,9 @@ impl App {
             }
             KeyCode::Up => self.scroll_up(1),
             KeyCode::Down => self.scroll_down(1),
+            KeyCode::Esc if self.is_busy() => self.interrupt_turn(),
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter if self.is_busy() => {
-                self.status = "waiting for current turn".to_string();
+                self.status = "waiting for current turn; Esc interrupts".to_string();
                 self.status_kind = StatusKind::Working;
             }
             KeyCode::Char(ch) => {
@@ -358,6 +367,10 @@ impl App {
                 self.show_checkpoints();
                 return Ok(false);
             }
+            "/context" => {
+                self.detect_context_window().await?;
+                return Ok(false);
+            }
             _ => {}
         }
 
@@ -454,6 +467,7 @@ impl App {
             .take()
             .context("session is unavailable while a turn is already running")?;
         let (event_tx, event_rx) = unbounded_channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
 
         self.transcript.push(TranscriptItem::user(input.clone()));
         self.follow_tail = true;
@@ -465,10 +479,17 @@ impl App {
         self.turn_first_token_at = None;
         self.turn_token_chars = 0;
         self.stream_rx = Some(event_rx);
+        self.cancel_tx = Some(cancel_tx);
         self.stream_item_index = None;
 
         self.send_task = Some(tokio::spawn(async move {
-            let result = session.send_user_message_streaming(input, event_tx).await;
+            let result = tokio::select! {
+                result = session.send_user_message_streaming(input, event_tx) => result,
+                _ = cancel_rx => {
+                    session.discard_trailing_user_message();
+                    Err(anyhow!(TURN_INTERRUPTED))
+                }
+            };
             (session, result)
         }));
 
@@ -492,6 +513,14 @@ impl App {
                         self.status = "ready".to_string();
                         self.status_kind = StatusKind::Ok;
                     }
+                    Err(error) if error.to_string() == TURN_INTERRUPTED => {
+                        self.transcript.push(TranscriptItem::system(
+                            "Interrupted",
+                            "Stopped the in-flight model turn.",
+                        ));
+                        self.status = "interrupted".to_string();
+                        self.status_kind = StatusKind::Warn;
+                    }
                     Err(error) => {
                         self.transcript
                             .push(TranscriptItem::error(format!("{error:#}")));
@@ -513,6 +542,7 @@ impl App {
         self.last_turn_elapsed = self.busy_since.map(|started| started.elapsed());
         self.last_reply_at = Some(Instant::now());
         self.busy_since = None;
+        self.cancel_tx = None;
         self.stream_phase = StreamPhase::Idle;
         self.turn_first_token_at = None;
         self.turn_token_chars = 0;
@@ -954,6 +984,90 @@ impl App {
                 self.status_kind = StatusKind::Error;
             }
         }
+        self.follow_tail = true;
+    }
+
+    async fn detect_context_window(&mut self) -> Result<()> {
+        if self.is_busy() {
+            self.status = "wait for current turn before detecting context".to_string();
+            self.status_kind = StatusKind::Warn;
+            return Ok(());
+        }
+
+        let old_window = self.config.model.context_window;
+        self.transcript.push(TranscriptItem::system(
+            "Context Detection",
+            "Checking the model server for the served context window...",
+        ));
+        self.status = "detecting context".to_string();
+        self.status_kind = StatusKind::Working;
+        self.follow_tail = true;
+
+        let client = ModelClient::new(self.config.model.clone());
+        match tokio::time::timeout(Duration::from_secs(15), client.detect_context_window()).await {
+            Ok(Ok(Some(detected_window))) if detected_window > 0 => {
+                let mut config = self.config.clone();
+                config.model.context_window = detected_window;
+                self.apply_config(config);
+                let path = self.config.save(self.config_path.clone())?;
+                self.config_path = Some(path.clone());
+
+                let detail = if detected_window == old_window {
+                    format!("Confirmed {detected_window} tokens.")
+                } else {
+                    format!(
+                        "Updated context window from {old_window} to {detected_window} tokens.\nSaved config to {}.",
+                        path.display()
+                    )
+                };
+                self.transcript
+                    .push(TranscriptItem::system("Context Detection", detail));
+                self.status = "context updated".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Ok(Ok(_)) => {
+                self.transcript.push(TranscriptItem::system(
+                    "Context Detection",
+                    "The server did not expose a context window for this model.",
+                ));
+                self.status = "context unavailable".to_string();
+                self.status_kind = StatusKind::Warn;
+            }
+            Ok(Err(error)) => {
+                self.transcript.push(TranscriptItem::error(format!(
+                    "Context detection failed: {error:#}"
+                )));
+                self.status = "context detection failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+            Err(_) => {
+                self.transcript.push(TranscriptItem::system(
+                    "Context Detection",
+                    "Timed out while checking the model server.",
+                ));
+                self.status = "context detection timed out".to_string();
+                self.status_kind = StatusKind::Warn;
+            }
+        }
+
+        self.follow_tail = true;
+        Ok(())
+    }
+
+    fn interrupt_turn(&mut self) {
+        let Some(cancel_tx) = self.cancel_tx.take() else {
+            self.status = "interrupt already requested".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        };
+
+        let _ = cancel_tx.send(());
+        self.transcript.push(TranscriptItem::system(
+            "Interrupt Requested",
+            "Stopping the in-flight model turn...",
+        ));
+        self.status = "interrupting".to_string();
+        self.status_kind = StatusKind::Warn;
         self.follow_tail = true;
     }
 
