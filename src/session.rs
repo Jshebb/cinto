@@ -1328,6 +1328,27 @@ fn hello() {}
     }
 
     #[test]
+    fn handle_crp_validation_accepts_final_response_only_trace() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let retried = session.handle_crp_validation(
+            "<FINAL_RESPONSE>Done without extra structure.</FINAL_RESPONSE>",
+            &mut retries,
+            3,
+            &tx,
+        );
+
+        assert!(!retried);
+        assert_eq!(retries, 0);
+        assert!(rx.try_recv().is_err());
+        assert!(session.history.is_empty());
+    }
+
+    #[test]
     fn handle_crp_validation_pushes_retry_when_final_response_missing() {
         let mut config = Config::default();
         config.harness.workspace = std::env::current_dir().unwrap();
