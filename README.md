@@ -240,7 +240,11 @@ workspace = "/home/you/project"
 allow_shell = false
 require_edit_approval = true
 reasoning_protocol = "crp"    # crp or plain
+crp_retry_budget = 3
+transport_retry_budget = 1
+empty_response_retry_budget = 1
 max_tool_turns = 16
+max_model_rounds = 64
 auto_context_compression = true
 context_compression_threshold = 80
 context_compression_keep_recent = 18
@@ -264,8 +268,12 @@ tool formats. It asks the model to return final answers as CRP slot traces while
 leaving tool invocation to the selected transport.
 
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
-ask for a narrower step. If the model returns neither text nor a tool call,
-Cinto shows an `Empty Model Response` note with the active model and format.
+ask for a narrower step. `max_model_rounds`, `crp_retry_budget`,
+`transport_retry_budget`, and `empty_response_retry_budget` are tracked
+separately so protocol repairs and transient request failures do not consume
+tool-call budget. If the model returns neither text nor a tool call after the
+empty-response retry budget is exhausted, Cinto shows an `Empty Model Response`
+note with the active model and format.
 
 ## Development
 

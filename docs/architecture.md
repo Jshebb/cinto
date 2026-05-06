@@ -73,9 +73,10 @@ session. `write_file` and `delete_file` are intentionally narrow: they only
 mutate regular files beneath the configured workspace. They require explicit TUI
 approval by default unless `harness.require_edit_approval` is disabled.
 
-Tool loops are capped by `harness.max_tool_turns`, which defaults to 16. Tool
-execution errors are returned to the model as tool output so the model can
-recover instead of crashing the UI turn.
+Tool execution is capped by `harness.max_tool_turns`, while total model calls,
+CRP repair attempts, empty-response retries, and transport retries each use
+their own budgets. Tool execution errors are returned to the model as tool
+output so the model can recover instead of crashing the UI turn.
 
 Milestone 2 should add a diff preview and a user approval step around write
 tools.

@@ -16,11 +16,16 @@ pub(super) enum SettingField {
     ThinkingEffort,
     Stream,
     Timeout,
+    ContextWindow,
     AutoContextCompression,
     ContextCompressionThreshold,
     ContextCompressionKeepRecent,
     WorkspaceInstructions,
     ToolTurns,
+    ModelRounds,
+    CrpRetries,
+    TransportRetries,
+    EmptyResponseRetries,
     Stop,
     Workspace,
     EditApproval,
@@ -29,7 +34,7 @@ pub(super) enum SettingField {
     DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 21] = [
+pub(super) const SETTINGS: [SettingField; 26] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::Format,
@@ -40,11 +45,16 @@ pub(super) const SETTINGS: [SettingField; 21] = [
     SettingField::ThinkingEffort,
     SettingField::Stream,
     SettingField::Timeout,
+    SettingField::ContextWindow,
     SettingField::AutoContextCompression,
     SettingField::ContextCompressionThreshold,
     SettingField::ContextCompressionKeepRecent,
     SettingField::WorkspaceInstructions,
     SettingField::ToolTurns,
+    SettingField::ModelRounds,
+    SettingField::CrpRetries,
+    SettingField::TransportRetries,
+    SettingField::EmptyResponseRetries,
     SettingField::Stop,
     SettingField::Workspace,
     SettingField::EditApproval,
@@ -70,11 +80,16 @@ impl SettingField {
             SettingField::ThinkingEffort => "thinking",
             SettingField::Stream => "stream",
             SettingField::Timeout => "timeout secs",
+            SettingField::ContextWindow => "context window",
             SettingField::AutoContextCompression => "auto context compression",
             SettingField::ContextCompressionThreshold => "context compression %",
             SettingField::ContextCompressionKeepRecent => "context keep recent",
             SettingField::WorkspaceInstructions => "workspace instructions",
             SettingField::ToolTurns => "tool turns",
+            SettingField::ModelRounds => "model rounds",
+            SettingField::CrpRetries => "crp retries",
+            SettingField::TransportRetries => "transport retries",
+            SettingField::EmptyResponseRetries => "empty response retries",
             SettingField::Stop => "stop",
             SettingField::Workspace => "workspace",
             SettingField::EditApproval => "edit approval",
@@ -96,6 +111,7 @@ impl SettingField {
             SettingField::ThinkingEffort => config.model.thinking_effort.clone(),
             SettingField::Stream => config.model.stream.to_string(),
             SettingField::Timeout => config.model.request_timeout_secs.to_string(),
+            SettingField::ContextWindow => config.model.context_window.to_string(),
             SettingField::AutoContextCompression => {
                 config.harness.auto_context_compression.to_string()
             }
@@ -109,6 +125,12 @@ impl SettingField {
                 config.harness.load_workspace_instructions.to_string()
             }
             SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
+            SettingField::ModelRounds => config.harness.max_model_rounds.to_string(),
+            SettingField::CrpRetries => config.harness.crp_retry_budget.to_string(),
+            SettingField::TransportRetries => config.harness.transport_retry_budget.to_string(),
+            SettingField::EmptyResponseRetries => {
+                config.harness.empty_response_retry_budget.to_string()
+            }
             SettingField::Stop => config.model.stop.join(","),
             SettingField::Workspace => config.harness.workspace.display().to_string(),
             SettingField::EditApproval => config.harness.require_edit_approval.to_string(),
@@ -165,6 +187,9 @@ impl SettingField {
             SettingField::Timeout => {
                 config.model.request_timeout_secs = parse_number(&value, "timeout secs")?;
             }
+            SettingField::ContextWindow => {
+                config.model.context_window = parse_number(&value, "context window")?;
+            }
             SettingField::AutoContextCompression => {
                 config.harness.auto_context_compression = value
                     .trim()
@@ -190,6 +215,19 @@ impl SettingField {
             }
             SettingField::ToolTurns => {
                 config.harness.max_tool_turns = parse_number(&value, "tool turns")?;
+            }
+            SettingField::ModelRounds => {
+                config.harness.max_model_rounds = parse_number(&value, "model rounds")?;
+            }
+            SettingField::CrpRetries => {
+                config.harness.crp_retry_budget = parse_number(&value, "crp retries")?;
+            }
+            SettingField::TransportRetries => {
+                config.harness.transport_retry_budget = parse_number(&value, "transport retries")?;
+            }
+            SettingField::EmptyResponseRetries => {
+                config.harness.empty_response_retry_budget =
+                    parse_number(&value, "empty response retries")?;
             }
             SettingField::Stop => {
                 config.model.stop = value

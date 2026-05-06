@@ -224,7 +224,11 @@ impl App {
         // Apply harness settings from preset, keep workspace and prompts
         config.harness.reasoning_protocol = preset_config.harness.reasoning_protocol;
         config.harness.crp_retry_budget = preset_config.harness.crp_retry_budget;
+        config.harness.transport_retry_budget = preset_config.harness.transport_retry_budget;
+        config.harness.empty_response_retry_budget =
+            preset_config.harness.empty_response_retry_budget;
         config.harness.max_tool_turns = preset_config.harness.max_tool_turns;
+        config.harness.max_model_rounds = preset_config.harness.max_model_rounds;
         config.harness.auto_context_compression = preset_config.harness.auto_context_compression;
         config.harness.require_edit_approval = preset_config.harness.require_edit_approval;
         config.harness.allow_shell = preset_config.harness.allow_shell;

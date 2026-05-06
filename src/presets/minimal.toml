@@ -11,7 +11,7 @@ thinking_effort = "none"
 stream = true
 stop = []
 request_timeout_secs = 300
-context_window = 8192
+context_window = 32768
 
 [harness]
 workspace = "."
@@ -19,7 +19,10 @@ allow_shell = false
 require_edit_approval = true
 reasoning_protocol = "plain"
 crp_retry_budget = 0
+transport_retry_budget = 1
+empty_response_retry_budget = 1
 max_tool_turns = 16
+max_model_rounds = 32
 auto_context_compression = true
 context_compression_threshold = 80
 context_compression_keep_recent = 18

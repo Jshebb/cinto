@@ -64,6 +64,11 @@ pub enum TurnEvent {
         format: String,
         model: String,
     },
+    ModelRetryRequested {
+        attempt: u32,
+        budget: u32,
+        reason: String,
+    },
     CrpRetryRequested {
         attempt: u32,
         budget: u32,
@@ -80,6 +85,12 @@ pub enum TurnEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CrpValidationDecision {
     Accept,
+    RetryQueued,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelRetryDecision {
     RetryQueued,
     Exhausted,
 }
@@ -253,16 +264,33 @@ impl AgentSession {
         event_tx: UnboundedSender<TurnEvent>,
     ) -> Result<()> {
         let max_tool_turns = self.config.harness.max_tool_turns.max(1);
+        let max_model_rounds = self.config.harness.max_model_rounds.max(1);
         let crp_enabled = self
             .config
             .harness
             .reasoning_protocol
             .eq_ignore_ascii_case("crp");
         let crp_budget = self.config.harness.crp_retry_budget;
+        let transport_budget = self.config.harness.transport_retry_budget;
+        let empty_response_budget = self.config.harness.empty_response_retry_budget;
         let mut crp_retries_used: u32 = 0;
+        let mut empty_retries_used: u32 = 0;
+        let mut transport_retries_used: u32 = 0;
+        let mut tool_turns_used: u32 = 0;
+        let mut model_rounds_used: u32 = 0;
 
-        for _ in 0..max_tool_turns {
-            if let Some(event) = self.compact_context_if_needed() {
+        loop {
+            if model_rounds_used >= max_model_rounds {
+                let message = Message::assistant_final(format!(
+                    "I hit the configured model-round budget ({max_model_rounds}) before producing a final answer. Try asking for a narrower step, or raise `harness.max_model_rounds` in settings/config."
+                ));
+                self.history.push(message.clone());
+                let _ = event_tx.send(TurnEvent::Message(message));
+                return Ok(());
+            }
+            model_rounds_used += 1;
+
+            if let Some(event) = self.compact_context_if_needed().await {
                 let _ = event_tx.send(event);
             }
             let payload = self.adapter.render_request(&self.history);
@@ -274,19 +302,40 @@ impl AgentSession {
             loop {
                 tokio::select! {
                     result = &mut completion => {
-                        let completion = result?;
+                        let completion = match result {
+                            Ok(completion) => completion,
+                            Err(error) => {
+                                match self.handle_transport_retry(
+                                    &error,
+                                    &mut transport_retries_used,
+                                    transport_budget,
+                                    &event_tx,
+                                ) {
+                                    ModelRetryDecision::RetryQueued => break,
+                                    ModelRetryDecision::Exhausted => return Err(error),
+                                }
+                            }
+                        };
+                        let finish_reason = completion.finish_reason.as_deref();
                         match self.adapter.parse_response(&completion) {
                             AssistantOutput::Final(text) => {
                                 if text.trim().is_empty() {
-                                    let _ = event_tx.send(TurnEvent::EmptyModelResponse {
-                                        format: self.config.model.format.clone(),
-                                        model: self.config.model.model.clone(),
-                                    });
-                                    return Ok(());
+                                    match self.handle_empty_model_response(
+                                        &mut empty_retries_used,
+                                        empty_response_budget,
+                                        &event_tx,
+                                    ) {
+                                        ModelRetryDecision::RetryQueued => break,
+                                        ModelRetryDecision::Exhausted => {
+                                            self.emit_empty_model_response(&event_tx);
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                                 if crp_enabled {
                                     match self.handle_crp_validation(
                                         &text,
+                                        finish_reason,
                                         &mut crp_retries_used,
                                         crp_budget,
                                         &event_tx,
@@ -302,6 +351,16 @@ impl AgentSession {
                                 return Ok(());
                             }
                             AssistantOutput::ToolCall { recipient, arguments } => {
+                                if tool_turns_used >= max_tool_turns {
+                                    let message = Message::assistant_final(format!(
+                                        "I hit the configured tool-call budget ({max_tool_turns}) before producing a final answer. Try asking for a narrower step, or raise `harness.max_tool_turns` in settings/config."
+                                    ));
+                                    self.history.push(message.clone());
+                                    let _ = event_tx.send(TurnEvent::Message(message));
+                                    return Ok(());
+                                }
+                                tool_turns_used += 1;
+
                                 let _ = event_tx.send(TurnEvent::DiscardAssistantDraft);
                                 let call = Message::assistant_tool_call(recipient.clone(), arguments.clone());
                                 self.history.push(call.clone());
@@ -326,15 +385,22 @@ impl AgentSession {
                             }
                             AssistantOutput::Raw(text) => {
                                 if text.trim().is_empty() {
-                                    let _ = event_tx.send(TurnEvent::EmptyModelResponse {
-                                        format: self.config.model.format.clone(),
-                                        model: self.config.model.model.clone(),
-                                    });
-                                    return Ok(());
+                                    match self.handle_empty_model_response(
+                                        &mut empty_retries_used,
+                                        empty_response_budget,
+                                        &event_tx,
+                                    ) {
+                                        ModelRetryDecision::RetryQueued => break,
+                                        ModelRetryDecision::Exhausted => {
+                                            self.emit_empty_model_response(&event_tx);
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                                 if crp_enabled {
                                     match self.handle_crp_validation(
                                         &text,
+                                        finish_reason,
                                         &mut crp_retries_used,
                                         crp_budget,
                                         &event_tx,
@@ -357,18 +423,69 @@ impl AgentSession {
                 }
             }
         }
+    }
 
-        let message = Message::assistant_final(format!(
-            "I hit the configured tool-call budget ({max_tool_turns}) before producing a final answer. Try asking for a narrower step, or raise `harness.max_tool_turns` in settings/config."
-        ));
-        self.history.push(message.clone());
-        let _ = event_tx.send(TurnEvent::Message(message));
-        Ok(())
+    fn handle_empty_model_response(
+        &mut self,
+        retries_used: &mut u32,
+        budget: u32,
+        event_tx: &UnboundedSender<TurnEvent>,
+    ) -> ModelRetryDecision {
+        if *retries_used >= budget {
+            return ModelRetryDecision::Exhausted;
+        }
+
+        *retries_used += 1;
+        let attempt = *retries_used;
+        let crp_enabled = self
+            .config
+            .harness
+            .reasoning_protocol
+            .eq_ignore_ascii_case("crp");
+        self.history
+            .push(Message::user(empty_response_retry_message(crp_enabled)));
+
+        let _ = event_tx.send(TurnEvent::ModelRetryRequested {
+            attempt,
+            budget,
+            reason: "The model returned an empty response.".to_string(),
+        });
+        ModelRetryDecision::RetryQueued
+    }
+
+    fn handle_transport_retry(
+        &self,
+        error: &anyhow::Error,
+        retries_used: &mut u32,
+        budget: u32,
+        event_tx: &UnboundedSender<TurnEvent>,
+    ) -> ModelRetryDecision {
+        if *retries_used >= budget {
+            return ModelRetryDecision::Exhausted;
+        }
+
+        *retries_used += 1;
+        let attempt = *retries_used;
+        let detail = compact_inline(&format!("{error:#}"), 300);
+        let _ = event_tx.send(TurnEvent::ModelRetryRequested {
+            attempt,
+            budget,
+            reason: format!("Model request failed: {detail}. Retrying."),
+        });
+        ModelRetryDecision::RetryQueued
+    }
+
+    fn emit_empty_model_response(&self, event_tx: &UnboundedSender<TurnEvent>) {
+        let _ = event_tx.send(TurnEvent::EmptyModelResponse {
+            format: self.config.model.format.clone(),
+            model: self.config.model.model.clone(),
+        });
     }
 
     fn handle_crp_validation(
         &mut self,
         text: &str,
+        finish_reason: Option<&str>,
         retries_used: &mut u32,
         budget: u32,
         event_tx: &UnboundedSender<TurnEvent>,
@@ -380,7 +497,7 @@ impl AgentSession {
         );
         let config = template.validation_config(Some(workspace.as_path()));
 
-        let (retry_message, invalid_slots, parse_error) = match crp::parse(text) {
+        let (mut retry_message, invalid_slots, parse_error) = match crp::parse(text) {
             Ok(trace) => {
                 let report = crp::validate(&trace, &config);
                 if report.is_executable() {
@@ -398,6 +515,7 @@ impl AgentSession {
                 Some(error.to_string()),
             ),
         };
+        retry_message = add_finish_reason_retry_guidance(retry_message, finish_reason);
 
         if *retries_used >= budget {
             let _ = event_tx.send(TurnEvent::CrpRetryExhausted {
@@ -423,12 +541,14 @@ impl AgentSession {
         CrpValidationDecision::RetryQueued
     }
 
-    fn compact_context_if_needed(&mut self) -> Option<TurnEvent> {
+    async fn compact_context_if_needed(&mut self) -> Option<TurnEvent> {
         if !self.config.harness.auto_context_compression {
             return None;
         }
 
-        let context_window = self.config.model.context_window.max(1) as usize;
+        // Use the model client to dynamically determine the available context window size, 
+        // falling back to a configured value if the client cannot report it.
+        let context_window = self.client.get_available_context_window().await.max(1) as usize;
         let threshold_percent = self
             .config
             .harness
@@ -752,6 +872,31 @@ fn parse_json(arguments: &str) -> Result<Value> {
     serde_json::from_str(arguments.trim()).context("tool arguments must be JSON")
 }
 
+fn empty_response_retry_message(crp_enabled: bool) -> String {
+    if crp_enabled {
+        return "<RETRY_REASON>\nThe previous model response was empty. Re-emit either one valid tool call or a complete CRP trace with a non-empty <FINAL_RESPONSE> slot. Do not return an empty response.\n</RETRY_REASON>\n".to_string();
+    }
+
+    "The previous model response was empty. Please respond with either one valid tool call or a concise final answer.".to_string()
+}
+
+fn add_finish_reason_retry_guidance(message: String, finish_reason: Option<&str>) -> String {
+    let Some(reason) = finish_reason.filter(|reason| is_truncated_finish_reason(reason)) else {
+        return message;
+    };
+
+    format!(
+        "<RETRY_REASON>\nThe previous model response stopped with finish_reason `{reason}`, so it was likely truncated by the output token limit. Re-emit a shorter complete CRP trace with only essential slots and a non-empty <FINAL_RESPONSE>.\n</RETRY_REASON>\n\n{message}"
+    )
+}
+
+fn is_truncated_finish_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim().to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "model_length"
+    )
+}
+
 fn is_mutating_tool(recipient: &str) -> bool {
     let recipient = clean_recipient(recipient);
     let tool_name = recipient
@@ -876,7 +1021,7 @@ fn summarize_message(message: &Message) -> String {
         }
     }
 
-    let content = compact_inline(&message.content, 240);
+    let content = compact_inline(&message.content, 1000);
     format!("{role}{channel}{recipient}: {content}")
 }
 
@@ -884,12 +1029,15 @@ fn summarize_crp_trace(trace: &crp::Trace, role: &str, channel: &str, recipient:
     let mut parts = Vec::new();
 
     if let Some(task) = trace.get("TASK_INTERPRETATION") {
-        parts.push(format!("task: {}", compact_inline(&task.content, 120)));
+        parts.push(format!("task: {}", compact_inline(&task.content, 300)));
+    }
+    if let Some(work) = trace.get("WORK_DONE") {
+        parts.push(format!("work: {}", compact_inline(&work.content, 500)));
     }
     if let Some(response) = trace.get("FINAL_RESPONSE") {
         parts.push(format!(
             "response: {}",
-            compact_inline(&response.content, 200)
+            compact_inline(&response.content, 800)
         ));
     }
 
@@ -1236,8 +1384,8 @@ mod tests {
         let _ = fs::remove_dir_all(&workspace);
     }
 
-    #[test]
-    fn auto_context_compression_keeps_recent_history() {
+    #[tokio::test]
+    async fn auto_context_compression_keeps_recent_history() {
         let mut config = Config::default();
         config.model.context_window = 80;
         config.harness.context_compression_threshold = 10;
@@ -1257,6 +1405,7 @@ mod tests {
 
         let event = session
             .compact_context_if_needed()
+            .await
             .expect("context should compact");
 
         assert!(matches!(event, TurnEvent::ContextCompacted { .. }));
@@ -1279,8 +1428,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_context_compression_does_not_start_tail_with_tool_result() {
+    #[tokio::test]
+    async fn auto_context_compression_does_not_start_tail_with_tool_result() {
         let mut config = Config::default();
         config.model.context_window = 80;
         config.harness.context_compression_threshold = 10;
@@ -1303,6 +1452,7 @@ mod tests {
 
         session
             .compact_context_if_needed()
+            .await
             .expect("context should compact");
 
         assert_ne!(session.history[1].role, Role::Tool);
@@ -1330,9 +1480,9 @@ fn hello() {}
 </FILE_EDITS>
 <FINAL_RESPONSE>All good.</FINAL_RESPONSE>";
 
-        let retried = session.handle_crp_validation(trace, &mut retries, 3, &tx);
+        let decision = session.handle_crp_validation(trace, None, &mut retries, 3, &tx);
 
-        assert!(!retried);
+        assert_eq!(decision, CrpValidationDecision::Accept);
         assert_eq!(retries, 0);
         assert!(rx.try_recv().is_err());
         assert!(session.history.is_empty());
@@ -1346,14 +1496,15 @@ fn hello() {}
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut retries = 0u32;
 
-        let retried = session.handle_crp_validation(
+        let decision = session.handle_crp_validation(
             "<FINAL_RESPONSE>Done without extra structure.</FINAL_RESPONSE>",
+            None,
             &mut retries,
             3,
             &tx,
         );
 
-        assert!(!retried);
+        assert_eq!(decision, CrpValidationDecision::Accept);
         assert_eq!(retries, 0);
         assert!(rx.try_recv().is_err());
         assert!(session.history.is_empty());
@@ -1367,14 +1518,15 @@ fn hello() {}
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut retries = 0u32;
 
-        let retried = session.handle_crp_validation(
+        let decision = session.handle_crp_validation(
             "<TASK_INTERPRETATION>x</TASK_INTERPRETATION>",
+            None,
             &mut retries,
             3,
             &tx,
         );
 
-        assert!(retried);
+        assert_eq!(decision, CrpValidationDecision::RetryQueued);
         assert_eq!(retries, 1);
         assert_eq!(session.history.len(), 2);
         assert_eq!(session.history[0].role, Role::Assistant);
@@ -1406,14 +1558,15 @@ fn hello() {}
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut retries = 3u32;
 
-        let retried = session.handle_crp_validation(
+        let decision = session.handle_crp_validation(
             "<TASK_INTERPRETATION>x</TASK_INTERPRETATION>",
+            None,
             &mut retries,
             3,
             &tx,
         );
 
-        assert!(!retried);
+        assert_eq!(decision, CrpValidationDecision::Exhausted);
         assert_eq!(retries, 3);
         assert!(session.history.is_empty());
         match rx.try_recv().expect("event") {
@@ -1436,13 +1589,98 @@ fn hello() {}
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut retries = 0u32;
 
-        let retried = session.handle_crp_validation("hello", &mut retries, 3, &tx);
+        let decision = session.handle_crp_validation("hello", None, &mut retries, 3, &tx);
 
-        assert!(retried);
+        assert_eq!(decision, CrpValidationDecision::RetryQueued);
         assert_eq!(retries, 1);
         match rx.try_recv().expect("event") {
             TurnEvent::CrpRetryRequested { parse_error, .. } => {
                 assert!(parse_error.is_some());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_crp_validation_adds_truncation_guidance() {
+        let mut config = Config::default();
+        config.harness.workspace = std::env::current_dir().unwrap();
+        let mut session = AgentSession::new(config);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let decision = session.handle_crp_validation("hello", Some("length"), &mut retries, 3, &tx);
+
+        assert_eq!(decision, CrpValidationDecision::RetryQueued);
+        assert_eq!(session.history.len(), 2);
+        let retry = &session.history[1].content;
+        assert!(retry.contains("finish_reason `length`"));
+        assert!(retry.contains("shorter complete CRP trace"));
+        assert!(retry.contains("FINAL_RESPONSE"));
+    }
+
+    #[test]
+    fn handle_empty_model_response_queues_one_retry() {
+        let mut session = AgentSession::new(Config::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+
+        let decision = session.handle_empty_model_response(&mut retries, 1, &tx);
+
+        assert_eq!(decision, ModelRetryDecision::RetryQueued);
+        assert_eq!(retries, 1);
+        assert_eq!(session.history.len(), 1);
+        assert_eq!(session.history[0].role, Role::User);
+        assert!(session.history[0].content.contains("<RETRY_REASON>"));
+        match rx.try_recv().expect("event") {
+            TurnEvent::ModelRetryRequested {
+                attempt,
+                budget,
+                reason,
+            } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(budget, 1);
+                assert!(reason.contains("empty response"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_empty_model_response_exhausts_after_budget() {
+        let mut session = AgentSession::new(Config::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 1u32;
+
+        let decision = session.handle_empty_model_response(&mut retries, 1, &tx);
+
+        assert_eq!(decision, ModelRetryDecision::Exhausted);
+        assert_eq!(retries, 1);
+        assert!(session.history.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn handle_transport_retry_uses_separate_budget_without_history_mutation() {
+        let session = AgentSession::new(Config::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut retries = 0u32;
+        let error = anyhow!("connection closed");
+
+        let decision = session.handle_transport_retry(&error, &mut retries, 1, &tx);
+
+        assert_eq!(decision, ModelRetryDecision::RetryQueued);
+        assert_eq!(retries, 1);
+        assert!(session.history.is_empty());
+        match rx.try_recv().expect("event") {
+            TurnEvent::ModelRetryRequested {
+                attempt,
+                budget,
+                reason,
+            } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(budget, 1);
+                assert!(reason.contains("connection closed"));
             }
             other => panic!("unexpected event: {other:?}"),
         }

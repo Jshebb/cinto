@@ -580,7 +580,10 @@ impl App {
                 "ctx: {} / {}",
                 self.estimated_tokens, self.config.model.context_window
             )),
-            Line::raw(format!("tools: {}", self.config.harness.max_tool_turns)),
+            Line::raw(format!(
+                "tools: {}  rounds: {}",
+                self.config.harness.max_tool_turns, self.config.harness.max_model_rounds
+            )),
             Line::raw(format!("edits: {edit_mode}")),
         ];
 

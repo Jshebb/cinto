@@ -98,7 +98,7 @@ pub fn run(base_path: PathBuf, compare_path: PathBuf) -> Result<()> {
         let avg_compare = total_duration_compare / common_tasks as u128;
         let diff = avg_compare as f64 - avg_base as f64;
         let diff_percent = (diff / avg_base as f64) * 100.0;
-        
+
         println!("METRICS (Averages for common tasks):");
         println!("  Duration Base: {} ms", avg_base);
         println!("  Duration Compare: {} ms", avg_compare);
@@ -109,7 +109,8 @@ pub fn run(base_path: PathBuf, compare_path: PathBuf) -> Result<()> {
 }
 
 fn load_results(path: &PathBuf) -> Result<HashMap<String, BatchResult>> {
-    let file = File::open(path).with_context(|| format!("failed to open file {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("failed to open file {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut map = HashMap::new();
 

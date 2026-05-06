@@ -66,7 +66,10 @@ enum Command {
             help = "Optional LLM endpoint to use as a semantic evaluator (e.g., https://api.deepseek.com/v1)"
         )]
         evaluator_endpoint: Option<String>,
-        #[arg(long, help = "Optional LLM model name for the evaluator (e.g., deepseek-chat)")]
+        #[arg(
+            long,
+            help = "Optional LLM model name for the evaluator (e.g., deepseek-chat)"
+        )]
         evaluator_model: Option<String>,
         #[arg(long, help = "Optional API key for the evaluator model")]
         evaluator_api_key: Option<String>,
@@ -81,7 +84,9 @@ enum Command {
         )]
         dangerously_auto_approve: bool,
     },
-    #[command(about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements")]
+    #[command(
+        about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements"
+    )]
     EvalDiff {
         #[arg(help = "Path to the base (control) JSONL file")]
         base: PathBuf,

@@ -44,6 +44,40 @@ impl ModelClient {
         self.detect_context_from_ollama_show(&base_endpoint).await
     }
 
+    /// Gets the maximum context window size for a model.
+    /// Tries automatic detection first, then falls back to provider-specific defaults (halved).
+    /// If configured context_window is smaller than what's available, uses the configured value.
+    pub async fn get_available_context_window(&self) -> u32 {
+        if let Some(detected) = self.detect_context_window().await.ok().flatten() {
+            // If configured context_window is set, trust it (it might be intentionally larger or smaller than detected)
+            if self.config.context_window > 0 {
+                return self.config.context_window;
+            }
+            return detected;
+        }
+
+        // Detection failed - use configured value directly if set, otherwise provider default
+        if self.config.context_window > 0 {
+            return self.config.context_window;
+        }
+        self.provider_default_context_limit()
+    }
+
+    /// Gets the default context limit for this provider when detection fails.
+    fn provider_default_context_limit(&self) -> u32 {
+        let endpoint = self.config.endpoint.to_lowercase();
+
+        if endpoint.contains("lm-studio") || endpoint.contains("lmstudio") {
+            131072
+        } else if endpoint.contains("ollama") {
+            131072
+        } else if endpoint.contains("vllm") || endpoint.contains("llama.cpp") {
+            1048576
+        } else {
+            131072 // Default for unknown providers (e.g. Gemini, Anthropic)
+        }
+    }
+
     async fn detect_context_from_models_endpoint(&self, endpoint: &str) -> Result<Option<u32>> {
         let response = match self.authorize(self.http.get(endpoint)).send().await {
             Ok(response) => response,
@@ -165,15 +199,15 @@ impl ModelClient {
                 .json()
                 .await
                 .context("failed to decode completion response")?;
-            let text = body
+            let choice = body
                 .choices
                 .into_iter()
                 .next()
-                .map(|choice| choice.text)
                 .context("completion response had no choices")?;
             Ok(CompletionResult {
-                text,
+                text: choice.text,
                 tool_calls: Vec::new(),
+                finish_reason: choice.finish_reason,
             })
         }
     }
@@ -252,6 +286,7 @@ impl ModelClient {
             Ok(CompletionResult {
                 text: choice.message.content.unwrap_or_default(),
                 tool_calls: choice.message.tool_calls.unwrap_or_default(),
+                finish_reason: choice.finish_reason,
             })
         }
     }
@@ -396,6 +431,7 @@ async fn collect_stream(
     let mut buffer = String::new();
     let mut full = String::new();
     let mut tool_calls: Vec<PartialToolCall> = Vec::new();
+    let mut finish_reason: Option<String> = None;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("failed while streaming from {endpoint}"))?;
@@ -403,12 +439,24 @@ async fn collect_stream(
 
         while let Some(newline) = buffer.find('\n') {
             let line = buffer.drain(..=newline).collect::<String>();
-            process_sse_line(line.trim(), delta_tx.as_ref(), &mut full, &mut tool_calls)?;
+            process_sse_line(
+                line.trim(),
+                delta_tx.as_ref(),
+                &mut full,
+                &mut tool_calls,
+                &mut finish_reason,
+            )?;
         }
     }
 
     if !buffer.trim().is_empty() {
-        process_sse_line(buffer.trim(), delta_tx.as_ref(), &mut full, &mut tool_calls)?;
+        process_sse_line(
+            buffer.trim(),
+            delta_tx.as_ref(),
+            &mut full,
+            &mut tool_calls,
+            &mut finish_reason,
+        )?;
     }
 
     Ok(CompletionResult {
@@ -417,6 +465,7 @@ async fn collect_stream(
             .into_iter()
             .filter_map(PartialToolCall::finish)
             .collect(),
+        finish_reason,
     })
 }
 
@@ -425,6 +474,7 @@ fn process_sse_line(
     delta_tx: Option<&UnboundedSender<String>>,
     full: &mut String,
     tool_calls: &mut Vec<PartialToolCall>,
+    finish_reason: &mut Option<String>,
 ) -> Result<()> {
     let Some(data) = line.strip_prefix("data:") else {
         return Ok(());
@@ -438,6 +488,13 @@ fn process_sse_line(
         serde_json::from_str(data).context("failed to parse stream chunk")?;
     let choice = value.get("choices").and_then(|choices| choices.get(0));
     if let Some(choice) = choice {
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(serde_json::Value::as_str)
+            && !reason.is_empty()
+        {
+            *finish_reason = Some(reason.to_string());
+        }
         if let Some(delta) = extract_delta(choice)
             && !delta.is_empty()
         {
@@ -561,6 +618,8 @@ struct CompletionResponse {
 #[derive(Debug, Deserialize)]
 struct CompletionChoice {
     text: String,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -603,6 +662,8 @@ struct ChatCompletionResponse {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChoice {
     message: ChatCompletionMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -634,6 +695,25 @@ mod tests {
             normalize_endpoint("http://127.0.0.1:1234/v1/completions", &mode),
             "http://127.0.0.1:1234/v1/completions"
         );
+    }
+
+    #[test]
+    fn captures_stream_finish_reason() {
+        let mut full = String::new();
+        let mut tool_calls = Vec::new();
+        let mut finish_reason = None;
+
+        process_sse_line(
+            r#"data: {"choices":[{"delta":{"content":"hello"},"finish_reason":"length"}]}"#,
+            None,
+            &mut full,
+            &mut tool_calls,
+            &mut finish_reason,
+        )
+        .expect("stream line");
+
+        assert_eq!(full, "hello");
+        assert_eq!(finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
