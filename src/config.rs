@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,9 @@ pub fn preset_by_name(name: &str) -> Option<&'static ConfigPreset> {
     PRESETS.iter().find(|p| p.name == name)
 }
 
-
+pub fn preset_index(name: &str) -> Option<usize> {
+    PRESETS.iter().position(|p| p.name == name)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -207,7 +209,29 @@ impl Config {
         }
     }
 
+    /// Returns the maximum context window supported by the configured model provider.
+    /// Uses provider-specific defaults: Ollama (16k), LM Studio (32k), vLLM/OpenAI-compat (128k).
+    pub fn provider_max_context_window(&self) -> u32 {
+        let endpoint = self.model.endpoint.to_lowercase();
 
+        // Detect Ollama by default port or path
+        if endpoint.contains(":11434") || endpoint.contains("/api/chat") {
+            return 16_000;
+        }
+
+        // LM Studio typically uses Harmony/gpt-oss with large context support
+        if endpoint.contains(":1234") && (self.model.format == "harmony" || self.model.model.contains("gpt-oss")) {
+            return 200_000;
+        }
+
+        // vLLM or generic OpenAI-compatible server - assume large context support
+        if endpoint.contains(":8000") || endpoint.contains("/v1/chat/completions") {
+            return 128_000;
+        }
+
+        // Default fallback for unknown providers
+        32_768
+    }
 }
 
 fn default_timeout_secs() -> u64 {
