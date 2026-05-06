@@ -57,9 +57,7 @@ pub fn preset_by_name(name: &str) -> Option<&'static ConfigPreset> {
     PRESETS.iter().find(|p| p.name == name)
 }
 
-pub fn preset_index(name: &str) -> Option<usize> {
-    PRESETS.iter().position(|p| p.name == name)
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -98,10 +96,16 @@ pub struct HarnessConfig {
     pub reasoning_protocol: String,
     #[serde(default = "default_crp_retry_budget")]
     pub crp_retry_budget: u32,
+    #[serde(default = "default_transport_retry_budget")]
+    pub transport_retry_budget: u32,
+    #[serde(default = "default_empty_response_retry_budget")]
+    pub empty_response_retry_budget: u32,
     #[serde(default = "default_template")]
     pub default_template: String,
     #[serde(default = "default_max_tool_turns")]
     pub max_tool_turns: u32,
+    #[serde(default = "default_max_model_rounds")]
+    pub max_model_rounds: u32,
     #[serde(default = "default_auto_context_compression")]
     pub auto_context_compression: bool,
     #[serde(default = "default_context_compression_threshold")]
@@ -138,8 +142,11 @@ impl Default for Config {
                 require_edit_approval: default_require_edit_approval(),
                 reasoning_protocol: default_reasoning_protocol(),
                 crp_retry_budget: default_crp_retry_budget(),
+                transport_retry_budget: default_transport_retry_budget(),
+                empty_response_retry_budget: default_empty_response_retry_budget(),
                 default_template: default_template(),
                 max_tool_turns: default_max_tool_turns(),
+                max_model_rounds: default_max_model_rounds(),
                 auto_context_compression: default_auto_context_compression(),
                 context_compression_threshold: default_context_compression_threshold(),
                 context_compression_keep_recent: default_context_compression_keep_recent(),
@@ -199,6 +206,8 @@ impl Config {
             self.harness.reasoning_protocol = "crp".to_string();
         }
     }
+
+
 }
 
 fn default_timeout_secs() -> u64 {
@@ -211,6 +220,18 @@ fn default_context_window() -> u32 {
 
 fn default_max_tool_turns() -> u32 {
     24
+}
+
+fn default_max_model_rounds() -> u32 {
+    64
+}
+
+fn default_transport_retry_budget() -> u32 {
+    1
+}
+
+fn default_empty_response_retry_budget() -> u32 {
+    1
 }
 
 fn default_auto_context_compression() -> bool {
@@ -375,5 +396,15 @@ developer_prompt = "developer"
     fn default_max_tool_turns_is_24() {
         let config = Config::default();
         assert_eq!(config.harness.max_tool_turns, 24);
+    }
+
+    #[test]
+    fn default_retry_and_round_budgets_are_separate() {
+        let config = Config::default();
+
+        assert_eq!(config.harness.max_model_rounds, 64);
+        assert_eq!(config.harness.crp_retry_budget, 3);
+        assert_eq!(config.harness.transport_retry_budget, 1);
+        assert_eq!(config.harness.empty_response_retry_budget, 1);
     }
 }

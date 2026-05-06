@@ -1120,16 +1120,10 @@ pub fn greet() -> String { "hello".into() }
         assert!(report.is_executable());
         assert_eq!(report.invalid().count(), 0);
         let warnings: Vec<_> = report.warnings().collect();
-        assert!(
-            warnings
-                .iter()
-                .any(|outcome| outcome.slot == "TASK_INTERPRETATION")
-        );
-        assert!(
-            warnings
-                .iter()
-                .any(|outcome| outcome.slot == "RELEVANT_FILES")
-        );
+        assert!(warnings
+            .iter()
+            .any(|outcome| outcome.slot == "TASK_INTERPRETATION"));
+        // RELEVANT_FILES and WORK_DONE are optional now, so they don't produce warnings if missing
     }
 
     #[test]
@@ -1211,10 +1205,9 @@ pub fn greet() -> String { "hello".into() }
             .map(|s| s.name.as_str())
             .collect();
         assert!(required.contains(&"TASK_INTERPRETATION"));
-        assert!(required.contains(&"RELEVANT_FILES"));
-        assert!(required.contains(&"PROPOSED_APPROACH"));
         assert!(required.contains(&"FILE_EDITS"));
         assert!(required.contains(&"FINAL_RESPONSE"));
+        assert_eq!(required.len(), 3);
 
         let optional: Vec<&str> = template
             .slots
@@ -1222,6 +1215,8 @@ pub fn greet() -> String { "hello".into() }
             .filter(|s| !s.required)
             .map(|s| s.name.as_str())
             .collect();
+        assert!(optional.contains(&"RELEVANT_FILES"));
+        assert!(optional.contains(&"WORK_DONE"));
         assert!(optional.contains(&"SELF_VERIFICATION"));
     }
 
@@ -1233,7 +1228,10 @@ pub fn greet() -> String { "hello".into() }
         assert!(brief.contains("hard_required: FINAL_RESPONSE"));
         assert!(brief.contains("recommended:"));
         assert!(brief.contains("TASK_INTERPRETATION"));
+        assert!(brief.contains("FILE_EDITS"));
+        assert!(brief.contains("optional:"));
         assert!(brief.contains("RELEVANT_FILES"));
+        assert!(brief.contains("WORK_DONE"));
     }
 
     #[test]

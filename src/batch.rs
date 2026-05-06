@@ -148,11 +148,17 @@ pub async fn run(
             if !fixture.exists() || !fixture.is_dir() {
                 println!("  Fixture directory not found: {}", fixture.display());
                 errors.push(format!("Fixture not found: {}", fixture.display()));
-                if dry_run { continue; }
+                if dry_run {
+                    continue;
+                }
             } else {
-                let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                let temp_dir = std::env::temp_dir().join(format!("cinto-eval-{}-{}", task.id, millis));
-                
+                let millis = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                let temp_dir =
+                    std::env::temp_dir().join(format!("cinto-eval-{}-{}", task.id, millis));
+
                 // Copy fixture to temp
                 let status = Command::new("cp")
                     .arg("-R")
@@ -162,22 +168,36 @@ pub async fn run(
                 if !status.success() {
                     println!("  Failed to copy fixture to temp dir.");
                     errors.push("Failed to copy fixture".to_string());
-                    if dry_run { continue; }
+                    if dry_run {
+                        continue;
+                    }
                 } else {
                     active_workspace = temp_dir.clone();
                     is_temp_workspace = true;
 
                     // Initialize git in temp dir
-                    Command::new("git").current_dir(&temp_dir).args(["init"]).output()?;
-                    Command::new("git").current_dir(&temp_dir).args(["add", "."]).output()?;
-                    Command::new("git").current_dir(&temp_dir).args(["commit", "-m", "Initial"]).output()?;
+                    Command::new("git")
+                        .current_dir(&temp_dir)
+                        .args(["init"])
+                        .output()?;
+                    Command::new("git")
+                        .current_dir(&temp_dir)
+                        .args(["add", "."])
+                        .output()?;
+                    Command::new("git")
+                        .current_dir(&temp_dir)
+                        .args(["commit", "-m", "Initial"])
+                        .output()?;
                 }
             }
         }
 
         if dry_run {
             if is_temp_workspace {
-                println!("  Dry-run: removing temp workspace {}", active_workspace.display());
+                println!(
+                    "  Dry-run: removing temp workspace {}",
+                    active_workspace.display()
+                );
                 std::fs::remove_dir_all(&active_workspace).ok();
             }
             continue;
@@ -195,7 +215,7 @@ pub async fn run(
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
         let prompt = task.prompt.clone();
-        
+
         metrics.tokens_in = session.estimated_prompt_tokens() + (prompt.len() / 4);
         let start_time = Instant::now();
 
@@ -208,10 +228,7 @@ pub async fn run(
 
         while let Some(event) = event_rx.recv().await {
             match event {
-                TurnEvent::ToolApprovalRequested {
-                    response_tx,
-                    ..
-                } => {
+                TurnEvent::ToolApprovalRequested { response_tx, .. } => {
                     let _ = response_tx.send(true);
                 }
                 TurnEvent::CrpRetryRequested { attempt, .. } => {
@@ -240,12 +257,14 @@ pub async fn run(
                         let template_name = session.config().harness.default_template.clone();
                         let effort = session.config().model.thinking_effort.clone();
                         let templates = crp::TemplateSet::load(Some(
-                            crp::workspace_template_dir(&session.config().harness.workspace).as_path(),
+                            crp::workspace_template_dir(&session.config().harness.workspace)
+                                .as_path(),
                         ));
                         let active_template = templates.resolve(&template_name, &effort);
-                        let validation_config = active_template.validation_config(Some(active_workspace.as_path()));
+                        let validation_config =
+                            active_template.validation_config(Some(active_workspace.as_path()));
                         let report = crp::validate(&trace, &validation_config);
-                        
+
                         let mut required_slots_missing = false;
                         let mut filepaths_invalid = false;
                         for outcome in &report.outcomes {
@@ -258,12 +277,15 @@ pub async fn run(
                                 }
                             }
                         }
-                        
+
                         outputs.required_slots_present = !required_slots_missing;
                         outputs.filepaths_valid = !filepaths_invalid;
 
                         if !report.is_executable() {
-                            errors.push("Trace failed semantic validation (slots or files missing).".to_string());
+                            errors.push(
+                                "Trace failed semantic validation (slots or files missing)."
+                                    .to_string(),
+                            );
                         } else {
                             // Syntactically and statically valid. Let's check semantic tests if requested.
                             if let Some(cmd) = &task.validation_command {
@@ -280,7 +302,10 @@ pub async fn run(
                                         outputs.code_compiles = Some(true); // Assuming tests compiled
                                     } else {
                                         outputs.tests_pass = Some(false);
-                                        errors.push(format!("Failed to execute validation command: {}", cmd));
+                                        errors.push(format!(
+                                            "Failed to execute validation command: {}",
+                                            cmd
+                                        ));
                                     }
                                 }
                             }
@@ -330,10 +355,16 @@ pub async fn run(
         let result = BatchResult {
             task_id: task.id.clone(),
             model: config.model.model.clone(),
-            crp_enabled: config.harness.reasoning_protocol.eq_ignore_ascii_case("crp"),
+            crp_enabled: config
+                .harness
+                .reasoning_protocol
+                .eq_ignore_ascii_case("crp"),
             metadata: BatchMetadata {
                 cinto_version: env!("CARGO_PKG_VERSION").to_string(),
-                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
                 temperature: config.model.temperature,
                 thinking_effort: config.model.thinking_effort.clone(),
                 system_prompt: config.harness.system_prompt.clone(),

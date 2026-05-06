@@ -83,6 +83,7 @@ pub struct ApiToolFunction {
 pub struct CompletionResult {
     pub text: String,
     pub tool_calls: Vec<ApiToolCall>,
+    pub finish_reason: Option<String>,
 }
 
 pub trait PromptAdapter: Send + Sync + std::fmt::Debug {
@@ -149,45 +150,45 @@ fn prompt_pair(config: &Config) -> (String, String) {
     (system_prompt, developer_prompt)
 }
 
-const CRP_DEVELOPER_PROMPT: &str = r#"Cinto Reasoning Protocol (CRP) is the required final-response format.
+const CRP_DEVELOPER_PROMPT: &str = r#"## Cinto Reasoning Protocol (CRP)
 
-When you need workspace context or an action, use the tool-calling format made available by the current model adapter. Tool-call arguments still follow each tool's JSON schema.
+### Step 1 — Do the work with tools
 
-When you are ready to answer the user, the final answer must contain only a complete CRP trace. Use uppercase XML-like slots and do not write prose outside CRP slots.
+Before writing any response, use tool calls to gather context and perform actions.
+Call tools one at a time. Only proceed to Step 2 once all required information has been collected and all edits have been applied via tool calls.
+Do NOT describe what you plan to do — just do it via tool calls.
 
-The harness treats <FINAL_RESPONSE> as hard-required. Other template slots are recommended structure: include them when useful, and keep their typed content valid when present.
+### Step 2 — Emit a response
 
-Use these standard slots when applicable:
+Once the work is complete, emit a CRP trace.
+For simple conversation, greetings, or direct answers where no technical work was performed, you may use a minimal trace with only <FINAL_RESPONSE>.
+For technical tasks involving research or edits, include recommended slots to make your work auditable.
+
+Do not mix prose and CRP slots. Do not write anything outside CRP tags.
+
+Use these slots to document what was done (past tense — work already completed):
 
 <TASK_INTERPRETATION>
-Briefly restate the user's request.
+What the user asked for.
 </TASK_INTERPRETATION>
 
 <RELEVANT_FILES>
-- path/to/file
+- path/to/file (only list files you actually read or modified via tool calls)
 </RELEVANT_FILES>
 
-<PROPOSED_APPROACH>
-- One concise step.
-</PROPOSED_APPROACH>
+<WORK_DONE>
+Summary of the actions taken and edits applied via tool calls.
+</WORK_DONE>
 
 <FILE_EDITS>
-Describe edits made or proposed. You may use <EDIT ...> blocks or terse @@ edit blocks.
+Edits applied. You may use terse @@ diff blocks.
 </FILE_EDITS>
 
-<COMMAND_PROPOSALS>
-- command here
-</COMMAND_PROPOSALS>
-
-<DELIVERABLE_SPEC>
-Observable success criteria.
-</DELIVERABLE_SPEC>
-
 <FINAL_RESPONSE>
-Concise user-facing answer.
+Concise answer to the user.
 </FINAL_RESPONSE>
 
-If you cannot proceed without user input, emit <CLARIFICATION_REQUEST> with one direct question and include <FINAL_RESPONSE> explaining that you need clarification. Keep slot content concise and auditable."#;
+If you cannot proceed without user input, emit <CLARIFICATION_REQUEST> with one direct question and include <FINAL_RESPONSE> explaining that you need clarification. Keep slot content concise."#;
 
 fn load_agents_instructions(workspace: &Path) -> Result<Option<String>> {
     let path = workspace.join(AGENTS_FILE);

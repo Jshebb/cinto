@@ -227,10 +227,14 @@ When a CRP trace is parsed, each slot receives one of three outcomes:
 - **VALID** - slot present, content matches type, all checks pass.
 - **WARNING** - slot present, content matches type, but a soft check failed
   (e.g., proposed file does not exist but path is well-formed).
-- **INVALID** - slot is missing when required, malformed, or fails a hard check.
+- **INVALID** - hard-required slot is missing or empty, a typed slot is
+  malformed, or a hard check failed.
 
-A trace is **executable** if all required slots are VALID and no INVALID slots
-exist. WARNING slots do not block execution but are surfaced to the user.
+A trace is **executable** if no INVALID slots exist. `FINAL_RESPONSE` is the
+default hard-required slot. Other template-required slots are recommended
+structure by default: missing or empty recommended slots produce WARNING
+outcomes, while typed content in those slots is still validated when present.
+WARNING slots do not block execution but may be surfaced to the user.
 
 ### 5.2 Retry Message Format
 

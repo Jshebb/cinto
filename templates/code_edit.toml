@@ -5,11 +5,11 @@ description = "Modify or extend existing files in the workspace."
 required = true
 
 [slots.RELEVANT_FILES]
-required = true
+required = false
 type = "BulletList<FilePath>"
 
-[slots.PROPOSED_APPROACH]
-required = true
+[slots.WORK_DONE]
+required = false
 
 [slots.FILE_EDITS]
 required = true

@@ -639,6 +639,24 @@ impl App {
                 self.status_kind = StatusKind::Warn;
                 self.follow_tail = true;
             }
+            TurnEvent::ModelRetryRequested {
+                attempt,
+                budget,
+                reason,
+            } => {
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
+                }
+                self.transcript.push(TranscriptItem::system(
+                    format!("Model Retry {attempt}/{budget}"),
+                    reason,
+                ));
+                self.status = "model retry".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
             TurnEvent::CrpRetryRequested {
                 attempt,
                 budget,
