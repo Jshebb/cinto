@@ -19,6 +19,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{config::Config, session::AgentSession, ui::App};
+use crate::config as config_mod;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,6 +47,15 @@ struct Args {
 enum Command {
     #[command(about = "Open the initial setup TUI")]
     Setup,
+    #[command(about = "Apply a built-in preset to the saved config without opening the TUI")]
+    UsePreset {
+        #[arg(help = "Preset name (e.g. lm-studio-small, ollama, vllm, minimal)")]
+        preset: String,
+        #[arg(long, help = "Override the model name from the preset")]
+        model: Option<String>,
+    },
+    #[command(about = "List available built-in presets")]
+    Presets,
     #[command(about = "Initialize .cinto/templates in the current workspace")]
     Init,
     #[command(about = "Remove the installed cinto binary")]
@@ -188,6 +198,34 @@ async fn main() -> Result<()> {
 
     if let Some(Command::EvalDiff { base, compare }) = args.command {
         eval_diff::run(base, compare)?;
+        return Ok(());
+    }
+
+    if let Some(Command::Presets) = args.command {
+        for preset in config_mod::PRESETS {
+            println!("{:<20} {}", preset.name, preset.description);
+        }
+        return Ok(());
+    }
+
+    if let Some(Command::UsePreset { preset: preset_name, model: model_override }) = args.command {
+        let preset = config_mod::preset_by_name(&preset_name)
+            .ok_or_else(|| anyhow::anyhow!(
+                "unknown preset '{}'. Run `cinto presets` to list available presets.",
+                preset_name
+            ))?;
+        let mut new_config = preset.to_config()?;
+        // Preserve the workspace from the existing config
+        new_config.harness.workspace = config.harness.workspace.clone();
+        if let Some(m) = model_override {
+            new_config.model.model = m;
+        }
+        let path = new_config.save(config_path)?;
+        println!("Preset '{}' written to {}", preset_name, path.display());
+        println!("  endpoint : {}", new_config.model.endpoint);
+        println!("  model    : {}", new_config.model.model);
+        println!("  format   : {}", new_config.model.format);
+        println!("  context  : {} tokens", new_config.model.context_window);
         return Ok(());
     }
 

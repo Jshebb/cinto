@@ -440,6 +440,13 @@ pub async fn run_kernel(
         .with_context(|| format!("failed to open {}", tasks_path.display()))?;
     let reader = BufReader::new(file);
 
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
+
     let mut output_file = OpenOptions::new()
         .create(true)
         .append(true)
