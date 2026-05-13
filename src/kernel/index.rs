@@ -184,7 +184,7 @@ fn walk(
 // Symbol extraction
 // ---------------------------------------------------------------------------
 
-fn extract_symbols(content: &str, language: &str) -> Vec<Symbol> {
+pub fn extract_symbols(content: &str, language: &str) -> Vec<Symbol> {
     match language {
         "rust" => rust_symbols(content),
         "python" => python_symbols(content),
@@ -337,7 +337,7 @@ fn sym(line: usize, kind: &str, name: &str) -> Symbol {
     }
 }
 
-fn language_for(ext: &str) -> Option<String> {
+pub fn language_for(ext: &str) -> Option<String> {
     Some(
         match ext {
             "rs" => "rust",

@@ -103,6 +103,31 @@ enum Command {
         #[arg(long, help = "Restrict to files matching a glob, e.g. '*.rs'")]
         glob: Option<String>,
     },
+    #[command(about = "Read a line range from a workspace file")]
+    ReadRange {
+        #[arg(help = "Relative file path")]
+        file: String,
+        #[arg(help = "Start line (1-indexed)")]
+        start: usize,
+        #[arg(help = "End line (inclusive)")]
+        end: usize,
+    },
+    #[command(about = "Read lines around a query match in a workspace file")]
+    ReadAround {
+        #[arg(help = "Relative file path")]
+        file: String,
+        #[arg(help = "Search query")]
+        query: String,
+        #[arg(long, default_value = "5")]
+        before: usize,
+        #[arg(long, default_value = "5")]
+        after: usize,
+    },
+    #[command(about = "List symbols defined in a workspace file")]
+    ListSymbols {
+        #[arg(help = "Relative file path")]
+        file: String,
+    },
 }
 
 #[tokio::main]
@@ -158,6 +183,31 @@ async fn main() -> Result<()> {
         params.file_glob = glob;
         let result = kernel::search::search(workspace, params)?;
         print!("{}", result.formatted);
+        return Ok(());
+    }
+
+    if let Some(Command::ReadRange { file, start, end }) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let out = kernel::read::read_range(workspace, &file, start, end)?;
+        print!("{out}");
+        return Ok(());
+    }
+
+    if let Some(Command::ReadAround { file, query, before, after }) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let params = kernel::read::AroundParams { before, after };
+        let out = kernel::read::read_around(workspace, &file, &query, params)?;
+        print!("{out}");
+        return Ok(());
+    }
+
+    if let Some(Command::ListSymbols { file }) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let out = kernel::read::list_symbols(workspace, &file)?;
+        print!("{out}");
         return Ok(());
     }
 
