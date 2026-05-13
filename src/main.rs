@@ -128,6 +128,17 @@ enum Command {
         #[arg(help = "Relative file path")]
         file: String,
     },
+    #[command(about = "Build and print a context pack for a task (kernel preview)")]
+    Pack {
+        #[arg(help = "Task description")]
+        task: String,
+        #[arg(long = "file", help = "Hint: include symbols for this file (repeatable)")]
+        files: Vec<String>,
+        #[arg(long = "search", help = "Hint: run this search and include results (repeatable)")]
+        search_terms: Vec<String>,
+        #[arg(long, help = "Budget in chars (default 16000)")]
+        budget: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -183,6 +194,24 @@ async fn main() -> Result<()> {
         params.file_glob = glob;
         let result = kernel::search::search(workspace, params)?;
         print!("{}", result.formatted);
+        return Ok(());
+    }
+
+    if let Some(Command::Pack { task, files, search_terms, budget }) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let mut builder = kernel::context_pack::ContextPackBuilder::new(workspace)
+            .with_index();
+        if let Some(b) = budget {
+            builder = builder.with_budget(b);
+        }
+        let hints = kernel::context_pack::ContextHints {
+            files,
+            search_terms,
+            ranges: vec![],
+        };
+        let pack = builder.build(&task, &hints)?;
+        print!("{}", pack.formatted);
         return Ok(());
     }
 
