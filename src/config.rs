@@ -34,6 +34,12 @@ pub const PRESETS: &[ConfigPreset] = &[
         toml: include_str!("presets/lm_studio.toml"),
     },
     ConfigPreset {
+        name: "lm-studio-small",
+        label: "LM Studio (small model)",
+        description: "LM Studio with openai-tools format for sub-4B models (Gemma, Phi, etc.)",
+        toml: include_str!("presets/lm_studio_small.toml"),
+    },
+    ConfigPreset {
         name: "ollama",
         label: "Ollama",
         description: "Local Ollama server with OpenAI-tools format",

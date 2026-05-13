@@ -86,6 +86,8 @@ enum Command {
         dangerously_auto_approve: bool,
         #[arg(long, help = "Run tasks through the kernel pipeline instead of the conversational agent")]
         kernel: bool,
+        #[arg(long, help = "Context pack budget in chars for kernel mode (default 16000, reduce for small models)")]
+        kernel_budget: Option<usize>,
     },
     #[command(
         about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements"
@@ -163,10 +165,11 @@ async fn main() -> Result<()> {
         dry_run,
         dangerously_auto_approve,
         kernel,
+        kernel_budget,
     }) = args.command
     {
         if kernel {
-            batch::run_kernel(config, tasks, output, dry_run).await?;
+            batch::run_kernel(config, tasks, output, dry_run, kernel_budget).await?;
         } else {
             batch::run(
                 config,

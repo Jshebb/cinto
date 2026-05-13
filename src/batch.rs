@@ -425,6 +425,7 @@ pub async fn run_kernel(
     tasks_path: PathBuf,
     output_path: PathBuf,
     dry_run: bool,
+    budget: Option<usize>,
 ) -> Result<()> {
     use crate::kernel::{
         index::index_repo,
@@ -491,7 +492,10 @@ pub async fn run_kernel(
         let mut kernel_config = config.clone();
         kernel_config.harness.workspace = active_workspace.clone();
 
-        let worker = WorkerLoop::new(&active_workspace, kernel_config, task.prompt.clone(), event_tx);
+        let mut worker = WorkerLoop::new(&active_workspace, kernel_config, task.prompt.clone(), event_tx);
+        if let Some(b) = budget {
+            worker = worker.with_budget(b);
+        }
         let start = Instant::now();
         let workflow_result = worker.run_bugfix().await;
         let total_duration_ms = start.elapsed().as_millis();

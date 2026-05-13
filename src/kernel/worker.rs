@@ -85,6 +85,8 @@ pub struct WorkerLoop {
     config: Config,
     task: String,
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
+    /// Override the default context pack budget (chars). None = use DEFAULT_CODE_BUDGET.
+    budget: Option<usize>,
 }
 
 impl WorkerLoop {
@@ -99,7 +101,13 @@ impl WorkerLoop {
             config,
             task: task.into(),
             event_tx,
+            budget: None,
         }
+    }
+
+    pub fn with_budget(mut self, chars: usize) -> Self {
+        self.budget = Some(chars);
+        self
     }
 
     /// Run the full bugfix/feature pipeline.
@@ -187,8 +195,7 @@ impl WorkerLoop {
             files: locate_out.relevant_files.clone(),
             ..Default::default()
         };
-        let patch_pack = ContextPackBuilder::new(&self.workspace)
-            .with_index()
+        let patch_pack = self.builder()
             .build(&patch_task, &patch_hints)?;
         self.emit_pack(&patch_pack, StageKind::Patch.label());
 
@@ -277,15 +284,24 @@ impl WorkerLoop {
     }
 
     fn make_pack(&self, task: &str, hints: &ContextHints) -> ContextPack {
-        ContextPackBuilder::new(&self.workspace)
-            .with_index()
-            .build(task, hints)
-            .unwrap_or_else(|_| ContextPack {
-                chars_used: 0,
-                chars_budget: 0,
-                truncated: false,
-                formatted: format!("[TASK]\n{task}\n"),
-            })
+        let mut builder = ContextPackBuilder::new(&self.workspace).with_index();
+        if let Some(b) = self.budget {
+            builder = builder.with_budget(b);
+        }
+        builder.build(task, hints).unwrap_or_else(|_| ContextPack {
+            chars_used: 0,
+            chars_budget: 0,
+            truncated: false,
+            formatted: format!("[TASK]\n{task}\n"),
+        })
+    }
+
+    fn builder(&self) -> ContextPackBuilder {
+        let mut b = ContextPackBuilder::new(&self.workspace).with_index();
+        if let Some(budget) = self.budget {
+            b = b.with_budget(budget);
+        }
+        b
     }
 
     fn emit(&self, event: WorkerEvent) {
