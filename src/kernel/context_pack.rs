@@ -276,3 +276,82 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn pack_always_includes_task() {
+        let pack = ContextPackBuilder::new(workspace())
+            .build("Fix the search bug", &ContextHints::default())
+            .unwrap();
+        assert!(pack.formatted.contains("[TASK]"));
+        assert!(pack.formatted.contains("Fix the search bug"));
+    }
+
+    #[test]
+    fn pack_includes_budget_footer() {
+        let pack = ContextPackBuilder::new(workspace())
+            .build("test", &ContextHints::default())
+            .unwrap();
+        assert!(pack.formatted.contains("[budget:"));
+    }
+
+    #[test]
+    fn pack_respects_tiny_budget() {
+        let hints = ContextHints {
+            files: vec!["src/kernel/index.rs".into()],
+            search_terms: vec!["index_repo".into()],
+            ..Default::default()
+        };
+        let pack = ContextPackBuilder::new(workspace())
+            .with_budget(200)
+            .build("test task", &hints)
+            .unwrap();
+        // Code sections should be skipped or truncated to stay near budget
+        assert!(pack.chars_used <= 200 + 80); // small footer margin
+    }
+
+    #[test]
+    fn pack_sets_truncated_flag_when_over_budget() {
+        let hints = ContextHints {
+            files: vec!["src/session.rs".into()], // large file, many symbols
+            search_terms: vec!["fn".into()],
+            ..Default::default()
+        };
+        let pack = ContextPackBuilder::new(workspace())
+            .with_budget(100)
+            .build("test", &hints)
+            .unwrap();
+        assert!(pack.truncated);
+    }
+
+    #[test]
+    fn pack_with_index_loads_repo_map() {
+        let pack = ContextPackBuilder::new(workspace())
+            .with_index()
+            .build("test", &ContextHints::default())
+            .unwrap();
+        // If index exists (.cinto/project_map.json), repo map section appears
+        // Degrades gracefully if index missing
+        assert!(pack.formatted.contains("[TASK]"));
+    }
+
+    #[test]
+    fn pack_includes_symbols_for_hinted_file() {
+        let hints = ContextHints {
+            files: vec!["src/kernel/index.rs".into()],
+            ..Default::default()
+        };
+        let pack = ContextPackBuilder::new(workspace())
+            .build("test", &hints)
+            .unwrap();
+        assert!(pack.formatted.contains("index_repo") || pack.truncated);
+    }
+}

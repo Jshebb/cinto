@@ -84,6 +84,8 @@ enum Command {
             help = "DANGEROUS: Automatically approve all tool executions (including shell commands). Only use in an isolated VM or Docker container!"
         )]
         dangerously_auto_approve: bool,
+        #[arg(long, help = "Run tasks through the kernel pipeline instead of the conversational agent")]
+        kernel: bool,
     },
     #[command(
         about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements"
@@ -160,19 +162,24 @@ async fn main() -> Result<()> {
         evaluator_api_key,
         dry_run,
         dangerously_auto_approve,
+        kernel,
     }) = args.command
     {
-        batch::run(
-            config,
-            tasks,
-            output,
-            evaluator_endpoint,
-            evaluator_model,
-            evaluator_api_key,
-            dry_run,
-            dangerously_auto_approve,
-        )
-        .await?;
+        if kernel {
+            batch::run_kernel(config, tasks, output, dry_run).await?;
+        } else {
+            batch::run(
+                config,
+                tasks,
+                output,
+                evaluator_endpoint,
+                evaluator_model,
+                evaluator_api_key,
+                dry_run,
+                dangerously_auto_approve,
+            )
+            .await?;
+        }
         return Ok(());
     }
 

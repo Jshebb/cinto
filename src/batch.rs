@@ -390,3 +390,222 @@ pub async fn run(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Kernel batch runner
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Default)]
+struct KernelStageResult {
+    crp_valid: bool,
+    duration_ms: u128,
+    retries: u32,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct KernelBatchResult {
+    task_id: String,
+    model: String,
+    timestamp: u64,
+    stages_attempted: u32,
+    stages_completed: u32,
+    workflow_succeeded: bool,
+    interpret: Option<KernelStageResult>,
+    locate: Option<KernelStageResult>,
+    hypothesize: Option<KernelStageResult>,
+    patch: Option<KernelStageResult>,
+    report: Option<KernelStageResult>,
+    total_duration_ms: u128,
+    errors: Vec<String>,
+}
+
+pub async fn run_kernel(
+    config: Config,
+    tasks_path: PathBuf,
+    output_path: PathBuf,
+    dry_run: bool,
+) -> Result<()> {
+    use crate::kernel::{
+        index::index_repo,
+        worker::{WorkerEvent, WorkerLoop},
+    };
+
+    if dry_run {
+        println!("Kernel batch DRY-RUN: validating task file only.");
+    }
+
+    let file = std::fs::File::open(&tasks_path)
+        .with_context(|| format!("failed to open {}", tasks_path.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut output_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)
+        .with_context(|| format!("failed to open {}", output_path.display()))?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let task: BatchTask = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse task at line {}", line_idx + 1))?;
+
+        println!("[kernel] task: {} — {}", task.id, &task.prompt[..task.prompt.len().min(60)]);
+
+        if dry_run {
+            println!("  [dry-run] would run WorkerLoop on task {}", task.id);
+            continue;
+        }
+
+        // ── Set up workspace ─────────────────────────────────────────────────
+        let (active_workspace, is_temp) = if let Some(fixture) = &task.fixture_dir {
+            let src = if fixture.is_absolute() {
+                fixture.clone()
+            } else {
+                std::env::current_dir()?.join(fixture)
+            };
+            let tmp = std::env::temp_dir().join(format!("cinto_kernel_{}_{}", task.id, timestamp));
+            copy_dir_all(&src, &tmp)?;
+            (tmp, true)
+        } else {
+            (config.harness.workspace.clone(), false)
+        };
+
+        // ── Pre-index the workspace ──────────────────────────────────────────
+        if let Ok(idx) = index_repo(&active_workspace) {
+            let _ = crate::kernel::index::save(&active_workspace, &idx);
+        }
+
+        // ── Run WorkerLoop, collect events ───────────────────────────────────
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
+        let mut kernel_config = config.clone();
+        kernel_config.harness.workspace = active_workspace.clone();
+
+        let worker = WorkerLoop::new(&active_workspace, kernel_config, task.prompt.clone(), event_tx);
+        let start = Instant::now();
+        let workflow_result = worker.run_bugfix().await;
+        let total_duration_ms = start.elapsed().as_millis();
+
+        // ── Collect all events ───────────────────────────────────────────────
+        let mut events = Vec::new();
+        while let Ok(e) = event_rx.try_recv() {
+            events.push(e);
+        }
+
+        // ── Build per-stage results from events ──────────────────────────────
+        let mut stage_results: std::collections::HashMap<String, KernelStageResult> =
+            std::collections::HashMap::new();
+        let mut current_stage: Option<String> = None;
+        let mut stage_start: Option<Instant> = None;
+        let mut retry_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut errors: Vec<String> = Vec::new();
+        let mut stages_attempted: u32 = 0;
+        let mut stages_completed: u32 = 0;
+
+        // Replay events to reconstruct per-stage timing and validity
+        let event_start = Instant::now(); // approximate — events already happened
+        for event in &events {
+            match event {
+                WorkerEvent::StageStarted { stage } => {
+                    current_stage = Some(stage.clone());
+                    stage_start = Some(event_start); // approximate
+                    stages_attempted += 1;
+                }
+                WorkerEvent::StageCompleted { stage } => {
+                    let dur = stage_start.map(|s| s.elapsed().as_millis()).unwrap_or(0);
+                    let retries = *retry_counts.get(stage).unwrap_or(&0);
+                    stage_results.insert(stage.clone(), KernelStageResult {
+                        crp_valid: true,
+                        duration_ms: dur,
+                        retries,
+                        error: None,
+                    });
+                    stages_completed += 1;
+                    current_stage = None;
+                }
+                WorkerEvent::StageRetry { stage, attempt, .. } => {
+                    *retry_counts.entry(stage.clone()).or_default() = *attempt;
+                }
+                WorkerEvent::StageFailed { stage, error } => {
+                    let dur = stage_start.map(|s| s.elapsed().as_millis()).unwrap_or(0);
+                    let retries = *retry_counts.get(stage).unwrap_or(&0);
+                    stage_results.insert(stage.clone(), KernelStageResult {
+                        crp_valid: false,
+                        duration_ms: dur,
+                        retries,
+                        error: Some(error.clone()),
+                    });
+                    errors.push(format!("{stage}: {error}"));
+                }
+                WorkerEvent::WorkflowFailed { error } => {
+                    errors.push(error.clone());
+                }
+                _ => {}
+            }
+        }
+
+        if let Err(e) = &workflow_result {
+            errors.push(format!("{e:#}"));
+        }
+
+        let result = KernelBatchResult {
+            task_id: task.id.clone(),
+            model: config.model.model.clone(),
+            timestamp,
+            stages_attempted,
+            stages_completed,
+            workflow_succeeded: workflow_result.is_ok(),
+            interpret: stage_results.remove("interpret"),
+            locate: stage_results.remove("locate"),
+            hypothesize: stage_results.remove("hypothesize"),
+            patch: stage_results.remove("patch"),
+            report: stage_results.remove("report"),
+            total_duration_ms,
+            errors,
+        };
+
+        let json = serde_json::to_string(&result)?;
+        writeln!(output_file, "{json}")?;
+        output_file.flush()?;
+
+        println!(
+            "  stages: {}/{} — workflow: {} — {total_duration_ms}ms",
+            stages_completed,
+            stages_attempted,
+            if result.workflow_succeeded { "ok" } else { "failed" }
+        );
+
+        if is_temp {
+            std::fs::remove_dir_all(&active_workspace).ok();
+        }
+    }
+
+    if !dry_run {
+        println!("Kernel batch complete.");
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
+}

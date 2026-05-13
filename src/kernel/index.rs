@@ -337,7 +337,7 @@ fn sym(line: usize, kind: &str, name: &str) -> Symbol {
     }
 }
 
-pub fn language_for(ext: &str) -> Option<String> {
+pub(crate) fn language_for(ext: &str) -> Option<String> {
     Some(
         match ext {
             "rs" => "rust",
@@ -359,4 +359,84 @@ pub fn language_for(ext: &str) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn index_repo_finds_rust_files() {
+        let result = index_repo(workspace()).unwrap();
+        assert!(result.file_count > 0);
+        assert!(result.project_map.files.iter().any(|f| f.path == "src/main.rs"));
+    }
+
+    #[test]
+    fn index_repo_skips_target_and_cinto() {
+        let result = index_repo(workspace()).unwrap();
+        assert!(!result.project_map.files.iter().any(|f| f.path.starts_with("target/")));
+        assert!(!result.project_map.files.iter().any(|f| f.path.starts_with(".cinto/")));
+    }
+
+    #[test]
+    fn index_repo_extracts_rust_symbols() {
+        let result = index_repo(workspace()).unwrap();
+        let syms = result.symbol_index.get("src/main.rs").expect("main.rs should have symbols");
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"main"), "should find main fn");
+        assert!(names.contains(&"Args"), "should find Args struct");
+    }
+
+    #[test]
+    fn language_for_known_extensions() {
+        assert_eq!(language_for("rs"), Some("rust".into()));
+        assert_eq!(language_for("py"), Some("python".into()));
+        assert_eq!(language_for("ts"), Some("typescript".into()));
+        assert_eq!(language_for("go"), Some("go".into()));
+        assert_eq!(language_for("xyz"), None);
+    }
+
+    #[test]
+    fn rust_symbol_extraction() {
+        let src = "pub struct Foo;\npub fn bar() {}\nenum Baz {}\nimpl Foo {}\n";
+        let syms = extract_symbols(src, "rust");
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Foo"));
+        assert!(names.contains(&"bar"));
+        assert!(names.contains(&"Baz"));
+    }
+
+    #[test]
+    fn python_symbol_extraction() {
+        let src = "def foo():\n    pass\nclass Bar:\n    async def method(self):\n        pass\n";
+        let syms = extract_symbols(src, "python");
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"));
+        assert!(names.contains(&"Bar"));
+        assert!(names.contains(&"method"));
+    }
+
+    #[test]
+    fn js_symbol_extraction() {
+        let src = "function greet() {}\nexport class App {}\nexport interface Config {}\n";
+        let syms = extract_symbols(src, "javascript");
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"greet"));
+        assert!(names.contains(&"App"));
+        assert!(names.contains(&"Config"));
+    }
+
+    #[test]
+    fn file_entry_has_correct_metadata() {
+        let result = index_repo(workspace()).unwrap();
+        let entry = result.project_map.files.iter().find(|f| f.path == "src/main.rs").unwrap();
+        assert!(entry.lines > 0);
+        assert_eq!(entry.extension, "rs");
+        assert_eq!(entry.language.as_deref(), Some("rust"));
+    }
 }

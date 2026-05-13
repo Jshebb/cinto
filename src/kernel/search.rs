@@ -208,6 +208,7 @@ fn parse_rg_json(stdout: &str, max_results: usize) -> Vec<FileResult> {
 fn format_output(query: &str, files: &[FileResult], truncated: bool) -> String {
     let total: usize = files.iter().map(|f| f.match_count).sum();
 
+
     let mut out = String::new();
 
     out.push_str(&format!("search: {:?}\n", query));
@@ -222,12 +223,16 @@ fn format_output(query: &str, files: &[FileResult], truncated: bool) -> String {
     }
     out.push_str("\n\n");
 
-    for file in files {
+    'outer: for file in files {
         out.push_str(&file.file);
         out.push('\n');
 
         let mut prev_line: Option<usize> = None;
         for fl in &file.lines {
+            if out.len() >= MAX_OUTPUT_CHARS {
+                out.push_str("... output limit reached\n");
+                break 'outer;
+            }
             if let Some(prev) = prev_line {
                 if fl.line_number > prev + 1 {
                     out.push_str("  ...\n");
@@ -238,12 +243,68 @@ fn format_output(query: &str, files: &[FileResult], truncated: bool) -> String {
             prev_line = Some(fl.line_number);
         }
         out.push('\n');
-
-        if out.len() >= MAX_OUTPUT_CHARS {
-            out.push_str("... output limit reached\n");
-            break;
-        }
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn search_finds_known_term() {
+        let result = search(workspace(), SearchParams::new("index_repo")).unwrap();
+        assert!(result.match_count > 0);
+        assert!(result.formatted.contains("index_repo"));
+    }
+
+    #[test]
+    fn search_no_matches() {
+        // Search for a Rust-only pattern inside TOML files — structurally impossible to match.
+        let mut params = SearchParams::new("pub async fn");
+        params.file_glob = Some("*.toml".to_string());
+        let result = search(workspace(), params).unwrap();
+        assert_eq!(result.match_count, 0);
+        assert!(result.formatted.contains("no matches"));
+    }
+
+    #[test]
+    fn search_glob_restricts_files() {
+        let mut params = SearchParams::new("pub fn");
+        params.file_glob = Some("*.toml".to_string());
+        let result = search(workspace(), params).unwrap();
+        // toml files don't have `pub fn` — should be zero or only toml paths
+        for line in result.formatted.lines() {
+            if line.ends_with(".rs") && !line.contains('|') {
+                panic!("unexpected .rs file in toml-only search: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn search_output_within_char_limit() {
+        // "fn" is very common — will hit the cap
+        let result = search(workspace(), SearchParams::new("fn")).unwrap();
+        assert!(result.formatted.len() <= MAX_OUTPUT_CHARS + 60);
+    }
+
+    #[test]
+    fn search_caps_total_matches() {
+        let result = search(workspace(), SearchParams::new("fn")).unwrap();
+        assert!(result.match_count <= MAX_RESULTS_HARD_CAP);
+    }
+
+    #[test]
+    fn search_truncated_flag_set_at_cap() {
+        let result = search(workspace(), SearchParams::new("fn")).unwrap();
+        if result.match_count >= MAX_RESULTS_HARD_CAP {
+            assert!(result.truncated);
+        }
+    }
 }

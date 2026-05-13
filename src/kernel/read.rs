@@ -225,3 +225,101 @@ fn resolve(workspace: &Path, rel_path: &str) -> Result<PathBuf> {
     }
     Ok(canonical)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn read_range_returns_correct_lines() {
+        let out = read_range(workspace(), "src/kernel/index.rs", 1, 5).unwrap();
+        assert!(out.contains("src/kernel/index.rs"));
+        assert!(out.contains("1"));
+    }
+
+    #[test]
+    fn read_range_rejects_zero_start() {
+        let err = read_range(workspace(), "src/main.rs", 0, 5).unwrap_err();
+        assert!(err.to_string().contains("start line"));
+    }
+
+    #[test]
+    fn read_range_rejects_inverted_range() {
+        let err = read_range(workspace(), "src/main.rs", 10, 5).unwrap_err();
+        assert!(err.to_string().contains("end line"));
+    }
+
+    #[test]
+    fn read_range_rejects_path_traversal() {
+        let err = read_range(workspace(), "../../etc/passwd", 1, 5).unwrap_err();
+        assert!(
+            err.to_string().contains("not found") || err.to_string().contains("escapes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_range_caps_at_max_lines() {
+        // src/session.rs is large — request way more than MAX_RANGE_LINES
+        let out = read_range(workspace(), "src/session.rs", 1, 600).unwrap();
+        let code_lines = out.lines().filter(|l| l.contains('|')).count();
+        assert!(code_lines <= MAX_RANGE_LINES, "got {code_lines} lines, expected <= {MAX_RANGE_LINES}");
+        assert!(out.contains("capped"));
+    }
+
+    #[test]
+    fn read_around_finds_known_content() {
+        let out = read_around(
+            workspace(),
+            "src/kernel/index.rs",
+            "index_repo",
+            AroundParams::default(),
+        ).unwrap();
+        assert!(out.contains('>'), "should have a match marker");
+        assert!(out.contains("index_repo"));
+    }
+
+    #[test]
+    fn read_around_reports_no_match() {
+        let out = read_around(
+            workspace(),
+            "src/kernel/index.rs",
+            "zzz_not_in_this_file_xyz",
+            AroundParams::default(),
+        ).unwrap();
+        assert!(out.contains("no occurrences"));
+    }
+
+    #[test]
+    fn read_around_caps_occurrences() {
+        // "use" appears many times — should show at most MAX_AROUND_OCCURRENCES
+        let out = read_around(
+            workspace(),
+            "src/session.rs",
+            "use ",
+            AroundParams::default(),
+        ).unwrap();
+        let match_count = out.lines().filter(|l| l.starts_with("match ")).count();
+        assert!(match_count <= MAX_AROUND_OCCURRENCES);
+    }
+
+    #[test]
+    fn list_symbols_returns_rust_symbols() {
+        let out = list_symbols(workspace(), "src/kernel/index.rs").unwrap();
+        assert!(out.contains("index_repo"));
+        assert!(out.contains("fn"));
+        assert!(out.contains("symbol"));
+    }
+
+    #[test]
+    fn list_symbols_handles_markdown() {
+        let out = list_symbols(workspace(), "README.md").unwrap();
+        // No error, just "no symbols" message
+        assert!(!out.is_empty());
+    }
+}
