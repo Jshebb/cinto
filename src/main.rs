@@ -96,6 +96,13 @@ enum Command {
     },
     #[command(about = "Index the workspace and write .cinto/project_map.json and symbol_index.json")]
     Index,
+    #[command(about = "Search the workspace (kernel syscall, scoped output)")]
+    Search {
+        #[arg(help = "Query string (smart-case)")]
+        query: String,
+        #[arg(long, help = "Restrict to files matching a glob, e.g. '*.rs'")]
+        glob: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -141,6 +148,16 @@ async fn main() -> Result<()> {
     if let Some(Command::Init) = args.command {
         let config = Config::load(args.config)?;
         init::run(&config)?;
+        return Ok(());
+    }
+
+    if let Some(Command::Search { query, glob }) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let mut params = kernel::search::SearchParams::new(query);
+        params.file_glob = glob;
+        let result = kernel::search::search(workspace, params)?;
+        print!("{}", result.formatted);
         return Ok(());
     }
 
