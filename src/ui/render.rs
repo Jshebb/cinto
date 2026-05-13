@@ -439,6 +439,11 @@ impl App {
                         "thinking".to_string(),
                         self.theme.phase_style(PhaseGlyph::Thinking),
                     ),
+                    StreamPhase::KernelStage(stage) => (
+                        PhaseGlyph::Tool,
+                        format!("kernel · {stage}"),
+                        self.theme.phase_style(PhaseGlyph::Tool),
+                    ),
                 }
             };
 
@@ -1007,6 +1012,7 @@ fn stream_header_line(
         StreamPhase::Responding => "final",
         StreamPhase::CallingTool(_) => "commentary",
         StreamPhase::Idle | StreamPhase::WarmingUp | StreamPhase::Thinking => "analysis",
+        StreamPhase::KernelStage(_) => "commentary",
     };
     let tokens = token_chars / 4;
     let speed = first_token_at

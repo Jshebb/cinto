@@ -21,6 +21,7 @@ use tokio::{
 
 use crate::{
     config::Config,
+    kernel::worker::{WorkerEvent, WorkerLoop},
     model::ModelClient,
     session::{AgentSession, Channel, Role, TurnEvent},
     theme::{StatusKind, Theme},
@@ -52,6 +53,7 @@ enum View {
 }
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
+type KernelTask = JoinHandle<Result<String>>;
 const TURN_INTERRUPTED: &str = "turn interrupted";
 
 struct PendingToolApproval {
@@ -68,6 +70,7 @@ pub(crate) enum StreamPhase {
     CrpSlot(String),
     CallingTool(String),
     Responding,
+    KernelStage(String),
 }
 
 pub struct App {
@@ -91,6 +94,9 @@ pub struct App {
     chat_scroll: u16,
     follow_tail: bool,
     spinner_tick: u64,
+    kernel_mode: bool,
+    kernel_task: Option<KernelTask>,
+    kernel_rx: Option<UnboundedReceiver<WorkerEvent>>,
     send_task: Option<TurnTask>,
     cancel_tx: Option<oneshot::Sender<()>>,
     stream_rx: Option<UnboundedReceiver<TurnEvent>>,
@@ -142,6 +148,9 @@ impl App {
             chat_scroll: 0,
             follow_tail: true,
             spinner_tick: 0,
+            kernel_mode: false,
+            kernel_task: None,
+            kernel_rx: None,
             send_task: None,
             cancel_tx: None,
             stream_rx: None,
@@ -234,6 +243,10 @@ impl App {
                     self.header_expanded = !self.header_expanded;
                     continue;
                 }
+                if key.code == KeyCode::F(5) {
+                    self.toggle_kernel_mode();
+                    continue;
+                }
 
                 match self.view {
                     View::Chat => {
@@ -296,6 +309,10 @@ impl App {
 
         match input.as_str() {
             "/quit" | "/exit" => return Ok(true),
+            "/kernel" => {
+                self.toggle_kernel_mode();
+                return Ok(false);
+            }
             "/settings" => {
                 self.view = View::Settings;
                 self.clear_path_suggestions();
@@ -462,6 +479,10 @@ impl App {
     }
 
     fn start_async_turn(&mut self, input: String) -> Result<()> {
+        if self.kernel_mode {
+            return self.start_kernel_turn(input);
+        }
+
         let mut session = self
             .session
             .take()
@@ -496,7 +517,126 @@ impl App {
         Ok(())
     }
 
+    fn start_kernel_turn(&mut self, input: String) -> Result<()> {
+        if self.kernel_task.is_some() {
+            self.status = "kernel turn already running".to_string();
+            self.status_kind = StatusKind::Warn;
+            return Ok(());
+        }
+
+        let (event_tx, event_rx) = unbounded_channel::<WorkerEvent>();
+        let workspace = self.config.harness.workspace.clone();
+        let config = self.config.clone();
+
+        self.transcript.push(TranscriptItem::user(input.clone()));
+        self.follow_tail = true;
+        self.status = "kernel: starting".to_string();
+        self.status_kind = StatusKind::Working;
+        self.busy_since = Some(Instant::now());
+        self.last_turn_elapsed = None;
+        self.stream_phase = StreamPhase::WarmingUp;
+        self.kernel_rx = Some(event_rx);
+
+        self.kernel_task = Some(tokio::spawn(async move {
+            WorkerLoop::new(&workspace, config, input, event_tx)
+                .run_bugfix()
+                .await
+        }));
+
+        Ok(())
+    }
+
+    fn apply_kernel_event(&mut self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::StageStarted { stage } => {
+                self.stream_phase = StreamPhase::KernelStage(stage.clone());
+                self.status = format!("kernel: {stage}");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::ContextPackReady { stage, chars_used, budget } => {
+                self.status = format!("kernel: {stage} [{chars_used}/{budget} chars]");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::StageCompleted { stage } => {
+                self.status = format!("kernel: {stage} ✓");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::StageRetry { stage, attempt, reason } => {
+                self.transcript.push(TranscriptItem::system(
+                    format!("Kernel retry — {stage} (attempt {attempt})"),
+                    reason,
+                ));
+            }
+            WorkerEvent::StageFailed { stage, error } => {
+                self.transcript.push(TranscriptItem::error(
+                    format!("Kernel stage {stage} failed: {error}"),
+                ));
+            }
+            WorkerEvent::WorkflowComplete { final_response } => {
+                let mut item = TranscriptItem::assistant_stream();
+                item.body = final_response;
+                self.transcript.push(item);
+                self.follow_tail = true;
+            }
+            WorkerEvent::WorkflowFailed { error } => {
+                self.transcript.push(TranscriptItem::error(
+                    format!("Kernel workflow failed: {error}"),
+                ));
+            }
+        }
+    }
+
+    fn toggle_kernel_mode(&mut self) {
+        if self.is_busy() {
+            self.status = "cannot switch mode while a turn is running".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        }
+        self.kernel_mode = !self.kernel_mode;
+        let mode = if self.kernel_mode { "kernel" } else { "core" };
+        self.append_system(
+            "Mode",
+            format!("Switched to {mode} mode. {}", if self.kernel_mode {
+                "Tasks run as a staged pipeline. F5 or /kernel to switch back."
+            } else {
+                "Tasks run as a conversational agent. F5 or /kernel to switch back."
+            }),
+        );
+        self.status = format!("mode: {mode}");
+        self.status_kind = StatusKind::Idle;
+    }
+
     async fn finish_completed_turn(&mut self) -> Result<()> {
+        // ── Kernel task ──────────────────────────────────────────────────────
+        if let Some(task) = &self.kernel_task {
+            if task.is_finished() {
+                let task = self.kernel_task.take().expect("checked");
+                match task.await {
+                    Ok(Ok(_)) => {
+                        self.status = "kernel: done".to_string();
+                        self.status_kind = StatusKind::Ok;
+                    }
+                    Ok(Err(e)) => {
+                        self.transcript.push(TranscriptItem::error(format!("{e:#}")));
+                        self.status = "kernel: failed".to_string();
+                        self.status_kind = StatusKind::Error;
+                    }
+                    Err(e) => {
+                        self.transcript.push(TranscriptItem::error(format!("kernel task: {e}")));
+                        self.status = "kernel: task error".to_string();
+                        self.status_kind = StatusKind::Error;
+                    }
+                }
+                self.last_turn_elapsed = self.busy_since.map(|s| s.elapsed());
+                self.last_reply_at = Some(Instant::now());
+                self.busy_since = None;
+                self.stream_phase = StreamPhase::Idle;
+                self.kernel_rx = None;
+                self.follow_tail = true;
+            }
+        }
+
+        // ── Core task ────────────────────────────────────────────────────────
         let Some(task) = &self.send_task else {
             return Ok(());
         };
@@ -554,15 +694,21 @@ impl App {
     }
 
     fn drain_stream_events(&mut self) {
-        let Some(mut rx) = self.stream_rx.take() else {
-            return;
-        };
-
-        while let Ok(event) = rx.try_recv() {
-            self.apply_turn_event(event);
+        // Core events
+        if let Some(mut rx) = self.stream_rx.take() {
+            while let Ok(event) = rx.try_recv() {
+                self.apply_turn_event(event);
+            }
+            self.stream_rx = Some(rx);
         }
 
-        self.stream_rx = Some(rx);
+        // Kernel events
+        if let Some(mut rx) = self.kernel_rx.take() {
+            while let Ok(event) = rx.try_recv() {
+                self.apply_kernel_event(event);
+            }
+            self.kernel_rx = Some(rx);
+        }
     }
 
     fn apply_turn_event(&mut self, event: TurnEvent) {
@@ -1230,7 +1376,7 @@ impl App {
     }
 
     fn is_busy(&self) -> bool {
-        self.send_task.is_some()
+        self.send_task.is_some() || self.kernel_task.is_some()
     }
 }
 
