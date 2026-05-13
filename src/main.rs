@@ -5,6 +5,7 @@ pub mod crp;
 mod eval_diff;
 mod harmony;
 mod init;
+mod kernel;
 mod model;
 mod session;
 mod theme;
@@ -93,6 +94,8 @@ enum Command {
         #[arg(help = "Path to the compare (experiment) JSONL file")]
         compare: PathBuf,
     },
+    #[command(about = "Index the workspace and write .cinto/project_map.json and symbol_index.json")]
+    Index,
 }
 
 #[tokio::main]
@@ -138,6 +141,25 @@ async fn main() -> Result<()> {
     if let Some(Command::Init) = args.command {
         let config = Config::load(args.config)?;
         init::run(&config)?;
+        return Ok(());
+    }
+
+    if let Some(Command::Index) = args.command {
+        let config = Config::load(args.config)?;
+        let workspace = &config.harness.workspace;
+        let result = kernel::index::index_repo(workspace)?;
+        kernel::index::save(workspace, &result)?;
+        println!("Indexed workspace: {}", result.project_map.root);
+        println!("  Files:   {}", result.file_count);
+        println!("  Symbols: {}", result.symbol_count);
+        println!(
+            "  Written: {}",
+            workspace.join(".cinto/project_map.json").display()
+        );
+        println!(
+            "           {}",
+            workspace.join(".cinto/symbol_index.json").display()
+        );
         return Ok(());
     }
 
