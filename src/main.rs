@@ -53,6 +53,10 @@ enum Command {
         preset: String,
         #[arg(long, help = "Override the model name from the preset")]
         model: Option<String>,
+        #[arg(long, help = "Override the context window size in tokens")]
+        context: Option<u32>,
+        #[arg(long, help = "Override max output tokens")]
+        max_tokens: Option<u32>,
     },
     #[command(about = "List available built-in presets")]
     Presets,
@@ -208,17 +212,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(Command::UsePreset { preset: preset_name, model: model_override }) = args.command {
+    if let Some(Command::UsePreset { preset: preset_name, model: model_override, context, max_tokens }) = args.command {
         let preset = config_mod::preset_by_name(&preset_name)
             .ok_or_else(|| anyhow::anyhow!(
                 "unknown preset '{}'. Run `cinto presets` to list available presets.",
                 preset_name
             ))?;
         let mut new_config = preset.to_config()?;
-        // Preserve the workspace from the existing config
         new_config.harness.workspace = config.harness.workspace.clone();
         if let Some(m) = model_override {
             new_config.model.model = m;
+        }
+        if let Some(c) = context {
+            new_config.model.context_window = c;
+        }
+        if let Some(t) = max_tokens {
+            new_config.model.max_tokens = t;
         }
         let path = new_config.save(config_path)?;
         println!("Preset '{}' written to {}", preset_name, path.display());
@@ -226,6 +235,7 @@ async fn main() -> Result<()> {
         println!("  model    : {}", new_config.model.model);
         println!("  format   : {}", new_config.model.format);
         println!("  context  : {} tokens", new_config.model.context_window);
+        println!("  max_tok  : {}", new_config.model.max_tokens);
         return Ok(());
     }
 
