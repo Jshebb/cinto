@@ -49,7 +49,7 @@ enum Command {
     Setup,
     #[command(about = "Apply a built-in preset to the saved config without opening the TUI")]
     UsePreset {
-        #[arg(help = "Preset name (e.g. lm-studio-small, ollama, vllm, minimal)")]
+        #[arg(help = "Preset name (e.g. lm-studio-small, qwen3, ollama, vllm, minimal)")]
         preset: String,
         #[arg(long, help = "Override the model name from the preset")]
         model: Option<String>,

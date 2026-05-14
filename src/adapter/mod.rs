@@ -118,7 +118,7 @@ const AGENTS_FILE: &str = "AGENTS.md";
 const MAX_AGENTS_CHARS: usize = 24_000;
 
 fn prompt_pair(config: &Config) -> (String, String) {
-    let system_prompt = config.harness.system_prompt.clone();
+    let system_prompt = config.apply_no_think_prefix(config.harness.system_prompt.clone());
     let mut developer_prompt = config.harness.developer_prompt.clone();
 
     if config.harness.load_workspace_instructions
@@ -297,6 +297,18 @@ mod tests {
 
         assert!(developer_prompt.contains("Cinto Reasoning Protocol"));
         assert!(developer_prompt.contains("<FINAL_RESPONSE>"));
+    }
+
+    #[test]
+    fn prepends_no_think_directive_to_system_prompt() {
+        let mut config = Config::default();
+        config.model.no_think = true;
+        config.model.no_think_prefix = "<no_think>".to_string();
+        config.harness.system_prompt = "Base system prompt.".to_string();
+
+        let (system_prompt, _) = prompt_pair(&config);
+
+        assert!(system_prompt.starts_with("<no_think>\n\nBase system prompt."));
     }
 
     #[test]

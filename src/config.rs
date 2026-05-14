@@ -40,6 +40,12 @@ pub const PRESETS: &[ConfigPreset] = &[
         toml: include_str!("presets/lm_studio_small.toml"),
     },
     ConfigPreset {
+        name: "qwen3",
+        label: "Qwen3 / Qwen3.5",
+        description: "Qwen3-class local models with /no_think enabled",
+        toml: include_str!("presets/qwen3.toml"),
+    },
+    ConfigPreset {
         name: "ollama",
         label: "Ollama",
         description: "Local Ollama server with OpenAI-tools format",
@@ -85,6 +91,10 @@ pub struct ModelConfig {
     pub temperature: f32,
     #[serde(default = "default_thinking_effort")]
     pub thinking_effort: String,
+    #[serde(default)]
+    pub no_think: bool,
+    #[serde(default = "default_no_think_prefix")]
+    pub no_think_prefix: String,
     #[serde(default = "default_stream")]
     pub stream: bool,
     pub stop: Vec<String>,
@@ -139,6 +149,8 @@ impl Default for Config {
                 max_tokens: 4096,
                 temperature: 0.2,
                 thinking_effort: default_thinking_effort(),
+                no_think: false,
+                no_think_prefix: default_no_think_prefix(),
                 stream: default_stream(),
                 stop: vec!["<|return|>".to_string(), "<|call|>".to_string()],
                 request_timeout_secs: default_timeout_secs(),
@@ -238,6 +250,27 @@ impl Config {
         // Default fallback for unknown providers
         32_768
     }
+
+    pub fn apply_no_think_prefix(&self, prompt: String) -> String {
+        let Some(prefix) = self.model.no_think_directive() else {
+            return prompt;
+        };
+        format!("{prefix}\n\n{prompt}")
+    }
+}
+
+impl ModelConfig {
+    pub fn no_think_directive(&self) -> Option<&str> {
+        if !self.no_think {
+            return None;
+        }
+        let prefix = self.no_think_prefix.trim();
+        if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        }
+    }
 }
 
 fn default_timeout_secs() -> u64 {
@@ -298,6 +331,10 @@ fn default_template() -> String {
 
 fn default_thinking_effort() -> String {
     "medium".to_string()
+}
+
+fn default_no_think_prefix() -> String {
+    "/no_think".to_string()
 }
 
 fn default_format() -> String {
@@ -406,6 +443,14 @@ developer_prompt = "developer"
         let config = preset.to_config().expect("parse");
         assert_eq!(config.model.format, "openai-tools");
         assert!(config.model.endpoint.contains("11434"));
+    }
+
+    #[test]
+    fn preset_qwen3_enables_no_think() {
+        let preset = preset_by_name("qwen3").expect("qwen3 preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "openai-tools");
+        assert_eq!(config.model.no_think_directive(), Some("/no_think"));
     }
 
     #[test]

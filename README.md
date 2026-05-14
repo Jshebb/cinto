@@ -132,7 +132,7 @@ explicit `/v1/completions` endpoint for text-completion servers.
 | Server | Example endpoint | Recommended format | Notes |
 | --- | --- | --- | --- |
 | LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Default transport. CRP reasoning is enabled by default. |
-| LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`. |
+| LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`; use `no_think = true` for Qwen3-class models. |
 | Ollama | `http://127.0.0.1:11434` | `openai-tools` | Pull a tool-capable model such as `qwen2.5-coder:7b-instruct`. |
 
 Example Ollama flow:
@@ -150,6 +150,7 @@ endpoint = "http://127.0.0.1:11434"
 model = "qwen2.5-coder:7b-instruct"
 format = "openai-tools"
 thinking_effort = "none"
+no_think = false
 ```
 
 ## TUI Workflow
@@ -230,6 +231,8 @@ api_key_env = ""
 max_tokens = 4096
 temperature = 0.2
 thinking_effort = "medium"    # none, low, medium, high
+no_think = false              # prepends no_think_prefix to system prompts when true
+no_think_prefix = "/no_think" # set to "<no_think>" for servers/templates that expect it
 stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600

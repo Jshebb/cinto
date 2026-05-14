@@ -33,6 +33,7 @@ pub struct SearchResult {
     pub query: String,
     pub match_count: usize,
     pub truncated: bool,
+    pub files: Vec<String>,
     /// Ready-to-use text block for the model's context pack.
     pub formatted: String,
 }
@@ -72,12 +73,14 @@ pub fn search(workspace: &Path, params: SearchParams) -> Result<SearchResult> {
     let files = parse_rg_json(&stdout, max_results);
     let match_count: usize = files.iter().map(|f| f.match_count).sum();
     let truncated = match_count >= max_results;
+    let matched_files = files.iter().map(|f| f.file.clone()).collect();
     let formatted = format_output(&params.query, &files, truncated);
 
     Ok(SearchResult {
         query: params.query,
         match_count,
         truncated,
+        files: matched_files,
         formatted,
     })
 }
@@ -245,6 +248,20 @@ fn format_output(query: &str, files: &[FileResult], truncated: bool) -> String {
         out.push('\n');
     }
 
+    cap_output(out)
+}
+
+fn cap_output(mut out: String) -> String {
+    if out.len() <= MAX_OUTPUT_CHARS {
+        return out;
+    }
+
+    let mut cutoff = MAX_OUTPUT_CHARS;
+    while !out.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    out.truncate(cutoff);
+    out.push_str("\n... output limit reached\n");
     out
 }
 
@@ -255,6 +272,13 @@ mod tests {
 
     fn workspace() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn search_result_exposes_matched_files() {
+        let result = search(workspace(), SearchParams::new("SearchResult")).unwrap();
+
+        assert!(result.files.iter().any(|file| file == "src/kernel/search.rs"));
     }
 
     #[test]

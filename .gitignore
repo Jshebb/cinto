@@ -5,3 +5,6 @@ docs/obsidian/
 /wiki/
 /wifi/
 /website/
+eval/results/
+eval/traces/
+eval/training/

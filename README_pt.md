@@ -129,7 +129,7 @@ texto.
 | Servidor | Endpoint | Formato recomendado | Observação |
 | --- | --- | --- | --- |
 | LM Studio com `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Transporte padrão. Reasoning CRP vem ligado por padrão. |
-| LM Studio com Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Use `thinking_effort = "none"`. |
+| LM Studio com Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Use `thinking_effort = "none"`; para modelos Qwen3, use `no_think = true`. |
 | Ollama | `http://127.0.0.1:11434` | `openai-tools` | Use um modelo com tools, como `qwen2.5-coder:7b-instruct`. |
 
 Exemplo com Ollama:
@@ -147,6 +147,7 @@ endpoint = "http://127.0.0.1:11434"
 model = "qwen2.5-coder:7b-instruct"
 format = "openai-tools"
 thinking_effort = "none"
+no_think = false
 ```
 
 ## Fluxo no TUI
@@ -224,6 +225,8 @@ api_key_env = ""
 max_tokens = 4096
 temperature = 0.2
 thinking_effort = "medium"    # none, low, medium, high
+no_think = false              # prefixa no_think_prefix nos system prompts quando true
+no_think_prefix = "/no_think" # use "<no_think>" se o template/servidor exigir
 stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600
