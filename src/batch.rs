@@ -413,6 +413,11 @@ struct KernelBatchResult {
     stages_attempted: u32,
     stages_completed: u32,
     workflow_succeeded: bool,
+    files_changed: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation_passed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation_output: Option<String>,
     interpret: Option<KernelStageResult>,
     locate: Option<KernelStageResult>,
     hypothesize: Option<KernelStageResult>,
@@ -564,6 +569,7 @@ pub async fn run_kernel(
         let mut errors: Vec<String> = Vec::new();
         let mut stages_attempted: u32 = 0;
         let mut stages_completed: u32 = 0;
+        let mut files_changed: Vec<String> = Vec::new();
 
         // Replay events to reconstruct per-stage timing and validity
         let event_start = Instant::now(); // approximate — events already happened
@@ -604,8 +610,9 @@ pub async fn run_kernel(
                 WorkerEvent::WorkflowFailed { error } => {
                     errors.push(error.clone());
                 }
-                WorkerEvent::PatchApplied { files_changed } => {
-                    println!("  [patch] {}", files_changed.join(", "));
+                WorkerEvent::PatchApplied { files_changed: changed } => {
+                    println!("  [patch] {}", changed.join(", "));
+                    for f in changed { files_changed.push(f.clone()); }
                 }
                 WorkerEvent::StageSkipped { stage, reason } => {
                     errors.push(format!("{stage} skipped: {reason}"));
@@ -643,6 +650,42 @@ pub async fn run_kernel(
             errors.push(format!("{e:#}"));
         }
 
+        // ── Validation ───────────────────────────────────────────────────────
+        let (validation_passed, validation_output) =
+            if workflow_result.is_ok() && !files_changed.is_empty() {
+                if let Some(cmd) = &task.validation_command {
+                    let parts: Vec<&str> = cmd.split_whitespace().collect();
+                    match Command::new(parts[0])
+                        .args(&parts[1..])
+                        .current_dir(&active_workspace)
+                        .output()
+                    {
+                        Ok(out) => {
+                            let passed = out.status.success();
+                            let text = format!(
+                                "{}{}",
+                                String::from_utf8_lossy(&out.stdout),
+                                String::from_utf8_lossy(&out.stderr)
+                            )
+                            .trim()
+                            .chars()
+                            .take(800)
+                            .collect::<String>();
+                            println!("  [validate] {} — {}", if passed { "PASS" } else { "FAIL" }, cmd);
+                            (Some(passed), Some(text))
+                        }
+                        Err(e) => {
+                            errors.push(format!("validation command failed: {e}"));
+                            (Some(false), None)
+                        }
+                    }
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
         let result = KernelBatchResult {
             task_id: task.id.clone(),
             model: config.model.model.clone(),
@@ -650,6 +693,9 @@ pub async fn run_kernel(
             stages_attempted,
             stages_completed,
             workflow_succeeded: workflow_result.is_ok(),
+            files_changed,
+            validation_passed,
+            validation_output,
             interpret: stage_results.remove("interpret"),
             locate: stage_results.remove("locate"),
             hypothesize: stage_results.remove("hypothesize"),
