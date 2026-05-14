@@ -84,9 +84,18 @@ impl App {
 
         match code {
             KeyCode::Esc | KeyCode::Tab | KeyCode::F(2) => {
+                match self.config.save(self.config_path.clone()) {
+                    Ok(path) => {
+                        self.config_path = Some(path);
+                        self.status = "setup saved".to_string();
+                        self.status_kind = StatusKind::Ok;
+                    }
+                    Err(e) => {
+                        self.status = format!("setup: could not save — {e}");
+                        self.status_kind = StatusKind::Error;
+                    }
+                }
                 self.view = View::Chat;
-                self.status = "setup skipped".to_string();
-                self.status_kind = StatusKind::Warn;
             }
             KeyCode::Up => {
                 self.setup_selected = self
