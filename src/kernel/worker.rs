@@ -250,7 +250,12 @@ impl WorkerLoop {
     ) -> Result<StageOutput> {
         let templates = crp::TemplateSet::builtin();
         let template = templates.resolve(kind.template_name(), "");
-        let system_prompt = format!("{}\n\n---\n\n{}", template.render_brief(), pack.formatted);
+        let system_prompt = format!(
+            "{}\n\n{}\n\n---\n\n{}",
+            template.render_brief(),
+            one_shot_example(&kind),
+            pack.formatted
+        );
 
         let client = ModelClient::new(self.config.model.clone());
         let max_retries = self.config.harness.crp_retry_budget.max(1);
@@ -315,6 +320,71 @@ impl WorkerLoop {
             chars_used: pack.chars_used,
             budget: pack.chars_budget,
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot format example
+// ---------------------------------------------------------------------------
+
+fn one_shot_example(kind: &StageKind) -> &'static str {
+    match kind {
+        StageKind::Interpret => "\
+## Output format — follow this exactly
+
+<TASK_INTERPRETATION>
+One sentence restating the task in your own words.
+</TASK_INTERPRETATION>
+
+<FINAL_RESPONSE>
+Brief answer or plan.
+</FINAL_RESPONSE>",
+
+        StageKind::Locate => "\
+## Output format — follow this exactly
+
+<RELEVANT_FILES>
+- src/lib.rs
+- src/main.rs
+</RELEVANT_FILES>
+
+<FINAL_RESPONSE>
+The relevant files are src/lib.rs and src/main.rs.
+</FINAL_RESPONSE>",
+
+        StageKind::Hypothesize => "\
+## Output format — follow this exactly
+
+<PROPOSED_APPROACH>
+- Step one of the fix.
+- Step two of the fix.
+</PROPOSED_APPROACH>
+
+<FINAL_RESPONSE>
+Brief summary of the proposed approach.
+</FINAL_RESPONSE>",
+
+        StageKind::Patch => "\
+## Output format — follow this exactly
+
+<FILE_EDITS>
+<EDIT path=\"src/lib.rs\" mode=\"replace_function:broken_fn\">
+fn broken_fn() -> i32 {
+    42
+}
+</EDIT>
+</FILE_EDITS>
+
+<FINAL_RESPONSE>
+Fixed broken_fn to return the correct value.
+</FINAL_RESPONSE>",
+
+        StageKind::Report => "\
+## Output format — follow this exactly
+
+<FINAL_RESPONSE>
+Summary of what was changed and what the user should verify.
+</FINAL_RESPONSE>",
     }
 }
 
