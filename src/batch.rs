@@ -426,6 +426,7 @@ pub async fn run_kernel(
     output_path: PathBuf,
     dry_run: bool,
     budget: Option<usize>,
+    traces_dir: Option<PathBuf>,
 ) -> Result<()> {
     use crate::kernel::{
         index::index_repo,
@@ -446,6 +447,27 @@ pub async fn run_kernel(
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
+
+    // Set up trace writer if requested
+    let mut trace_file = if let Some(ref dir) = traces_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create traces dir {}", dir.display()))?;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let trace_path = dir.join(format!("traces_{ts}.jsonl"));
+        println!("Saving traces to {}", trace_path.display());
+        Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&trace_path)
+                .with_context(|| format!("failed to open {}", trace_path.display()))?,
+        )
+    } else {
+        None
+    };
 
     let mut output_file = OpenOptions::new()
         .create(true)
@@ -525,6 +547,7 @@ pub async fn run_kernel(
 
         // Replay events to reconstruct per-stage timing and validity
         let event_start = Instant::now(); // approximate — events already happened
+        let mut pending_traces: Vec<serde_json::Value> = Vec::new();
         for event in &events {
             match event {
                 WorkerEvent::StageStarted { stage } => {
@@ -561,6 +584,25 @@ pub async fn run_kernel(
                 WorkerEvent::WorkflowFailed { error } => {
                     errors.push(error.clone());
                 }
+                WorkerEvent::StageTrace {
+                    stage,
+                    system_prompt,
+                    user_message,
+                    model_response,
+                    crp_valid,
+                } => {
+                    pending_traces.push(serde_json::json!({
+                        "task_id": task.id,
+                        "model": config.model.model,
+                        "stage": stage,
+                        "system_prompt": system_prompt,
+                        "user_message": user_message,
+                        "model_response": model_response,
+                        "crp_valid": crp_valid,
+                        "workflow_succeeded": workflow_result.is_ok(),
+                        "timestamp": timestamp,
+                    }));
+                }
                 _ => {}
             }
         }
@@ -588,6 +630,17 @@ pub async fn run_kernel(
         let json = serde_json::to_string(&result)?;
         writeln!(output_file, "{json}")?;
         output_file.flush()?;
+
+        // Flush traces for this task
+        if let Some(ref mut tf) = trace_file {
+            for trace in &pending_traces {
+                writeln!(tf, "{trace}")?;
+            }
+            tf.flush()?;
+            if !pending_traces.is_empty() {
+                println!("  traces: {} stage record(s) saved", pending_traces.len());
+            }
+        }
 
         println!(
             "  stages: {}/{} — workflow: {} — {total_duration_ms}ms",

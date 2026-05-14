@@ -102,6 +102,8 @@ enum Command {
         kernel: bool,
         #[arg(long, help = "Context pack budget in chars for kernel mode (default 16000, reduce for small models)")]
         kernel_budget: Option<usize>,
+        #[arg(long, help = "Save full stage traces (prompt + response) to this directory for fine-tuning dataset generation")]
+        save_traces: Option<PathBuf>,
     },
     #[command(
         about = "Compare two batch evaluation JSONL runs and highlight regressions/improvements"
@@ -180,10 +182,11 @@ async fn main() -> Result<()> {
         dangerously_auto_approve,
         kernel,
         kernel_budget,
+        save_traces,
     }) = args.command
     {
         if kernel {
-            batch::run_kernel(config, tasks, output, dry_run, kernel_budget).await?;
+            batch::run_kernel(config, tasks, output, dry_run, kernel_budget, save_traces).await?;
         } else {
             batch::run(
                 config,

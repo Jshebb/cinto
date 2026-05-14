@@ -584,6 +584,9 @@ impl App {
                     format!("Kernel workflow failed: {error}"),
                 ));
             }
+            // Trace events carry raw prompt/response pairs for dataset generation.
+            // The TUI has no use for them — only the batch runner consumes them.
+            WorkerEvent::StageTrace { .. } => {}
         }
     }
 

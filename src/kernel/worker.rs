@@ -70,6 +70,15 @@ pub enum WorkerEvent {
     ContextPackReady { stage: String, chars_used: usize, budget: usize },
     WorkflowComplete { final_response: String },
     WorkflowFailed { error: String },
+    /// Full prompt/response pair for fine-tuning dataset generation.
+    /// Only emitted on successful stage completion (crp_valid or plain fallback).
+    StageTrace {
+        stage: String,
+        system_prompt: String,
+        user_message: String,
+        model_response: String,
+        crp_valid: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +277,16 @@ impl WorkerLoop {
                 .map_err(|e| anyhow!("model call failed at stage {}: {e}", kind.label()))?;
 
             match parse_stage_output(&result.text, &kind) {
-                Ok(out) => return Ok(out),
+                Ok(out) => {
+                    self.emit(WorkerEvent::StageTrace {
+                        stage: kind.label().into(),
+                        system_prompt: system_prompt.clone(),
+                        user_message: task.to_string(),
+                        model_response: result.text.clone(),
+                        crp_valid: out.crp_valid,
+                    });
+                    return Ok(out);
+                }
                 Err(reason) if attempt < max_retries => {
                     self.emit(WorkerEvent::StageRetry {
                         stage: kind.label().into(),
