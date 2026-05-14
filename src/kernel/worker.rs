@@ -344,8 +344,8 @@ Brief answer or plan.
 ## Output format — follow this exactly
 
 <RELEVANT_FILES>
-- src/lib.rs
-- src/main.rs
+src/lib.rs
+src/main.rs
 </RELEVANT_FILES>
 
 <FINAL_RESPONSE>
