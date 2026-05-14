@@ -532,11 +532,11 @@ pub async fn run_kernel(
                     stage_start = Some(event_start); // approximate
                     stages_attempted += 1;
                 }
-                WorkerEvent::StageCompleted { stage } => {
+                WorkerEvent::StageCompleted { stage, crp_valid } => {
                     let dur = stage_start.map(|s| s.elapsed().as_millis()).unwrap_or(0);
                     let retries = *retry_counts.get(stage).unwrap_or(&0);
                     stage_results.insert(stage.clone(), KernelStageResult {
-                        crp_valid: true,
+                        crp_valid: *crp_valid,
                         duration_ms: dur,
                         retries,
                         error: None,

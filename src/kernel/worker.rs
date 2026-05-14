@@ -47,18 +47,14 @@ impl StageKind {
 /// Typed output produced by each stage.
 #[derive(Debug, Clone, Default)]
 pub struct StageOutput {
-    /// Search terms to feed into the next locate stage.
     pub search_terms: Vec<String>,
-    /// Files the model identified as relevant.
     pub relevant_files: Vec<String>,
-    /// Proposed approach text.
     pub approach: Option<String>,
-    /// Raw FILE_EDITS slot content — forwarded to the patch applier.
     pub file_edits: Option<String>,
-    /// User-facing summary from FINAL_RESPONSE.
     pub final_response: Option<String>,
-    /// Full CRP trace kept for audit.
     pub raw_trace: String,
+    /// False when the model responded in plain text instead of CRP format.
+    pub crp_valid: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +64,7 @@ pub struct StageOutput {
 #[derive(Debug)]
 pub enum WorkerEvent {
     StageStarted { stage: String },
-    StageCompleted { stage: String },
+    StageCompleted { stage: String, crp_valid: bool },
     StageRetry { stage: String, attempt: u32, reason: String },
     StageFailed { stage: String, error: String },
     ContextPackReady { stage: String, chars_used: usize, budget: usize },
@@ -127,6 +123,7 @@ impl WorkerLoop {
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Interpret.label().into(),
+            crp_valid: interpret_out.crp_valid,
         });
 
         // ── Pipeline: load index concurrently while we continue ─────────────
@@ -155,6 +152,7 @@ impl WorkerLoop {
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Locate.label().into(),
+            crp_valid: locate_out.crp_valid,
         });
 
         // ── Pipeline: reload index for symbol/code reads ─────────────────────
@@ -183,6 +181,7 @@ impl WorkerLoop {
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Hypothesize.label().into(),
+            crp_valid: hyp_out.crp_valid,
         });
 
         // ── Stage 4: PATCH ───────────────────────────────────────────────────
@@ -207,6 +206,7 @@ impl WorkerLoop {
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Patch.label().into(),
+            crp_valid: patch_out.crp_valid,
         });
 
         // ── Stage 5: REPORT ──────────────────────────────────────────────────
@@ -226,6 +226,7 @@ impl WorkerLoop {
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Report.label().into(),
+            crp_valid: report_out.crp_valid,
         });
 
         let final_response = report_out
@@ -357,48 +358,85 @@ fn build_payload(config: &Config, system_prompt: &str, user_message: &str) -> Ch
 // ---------------------------------------------------------------------------
 
 fn parse_stage_output(raw: &str, kind: &StageKind) -> Result<StageOutput, String> {
-    let trace = crp::parse(raw).map_err(|e| format!("CRP parse error: {e}"))?;
+    // Try structured CRP first.
+    if let Ok(trace) = crp::parse(raw) {
+        let final_response = trace
+            .get("FINAL_RESPONSE")
+            .map(|s| s.content.trim().to_string());
 
-    let final_response = trace
-        .get("FINAL_RESPONSE")
-        .map(|s| s.content.trim().to_string());
-    if final_response.as_deref().map(str::is_empty).unwrap_or(true) {
-        return Err("FINAL_RESPONSE slot missing or empty".into());
+        if final_response.as_deref().is_some_and(|s| !s.is_empty()) {
+            let mut out = StageOutput {
+                raw_trace: raw.to_string(),
+                final_response,
+                crp_valid: true,
+                ..Default::default()
+            };
+
+            if matches!(kind, StageKind::Interpret) {
+                let source = trace
+                    .get("TASK_INTERPRETATION")
+                    .or_else(|| trace.get("PROPOSED_APPROACH"))
+                    .map(|s| s.content.as_str())
+                    .unwrap_or_default();
+                out.search_terms = extract_search_terms(source);
+            }
+            if matches!(kind, StageKind::Locate) {
+                if let Some(slot) = trace.get("RELEVANT_FILES") {
+                    out.relevant_files = parse_bullet_paths(&slot.content);
+                }
+            }
+            if let Some(slot) = trace.get("PROPOSED_APPROACH") {
+                let t = slot.content.trim();
+                if !t.is_empty() {
+                    out.approach = Some(t.to_string());
+                }
+            }
+            if let Some(slot) = trace.get("FILE_EDITS") {
+                let t = slot.content.trim();
+                if !t.is_empty() {
+                    out.file_edits = Some(t.to_string());
+                }
+            }
+            return Ok(out);
+        }
+    }
+
+    // Plain-text fallback for models that don't follow CRP format.
+    // The response is non-empty prose — salvage what we can so the
+    // pipeline can continue. crp_valid = false is recorded in metrics.
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("empty model response".into());
     }
 
     let mut out = StageOutput {
         raw_trace: raw.to_string(),
-        final_response,
+        final_response: Some(trimmed.to_string()),
         ..Default::default()
     };
 
+    // For interpret, extract identifiers from plain prose as search terms.
     if matches!(kind, StageKind::Interpret) {
-        let source = trace
-            .get("TASK_INTERPRETATION")
-            .or_else(|| trace.get("PROPOSED_APPROACH"))
-            .map(|s| s.content.as_str())
-            .unwrap_or_default();
-        out.search_terms = extract_search_terms(source);
+        out.search_terms = extract_search_terms(trimmed);
     }
 
+    // For locate, try to find file paths mentioned in plain text.
     if matches!(kind, StageKind::Locate) {
-        if let Some(slot) = trace.get("RELEVANT_FILES") {
-            out.relevant_files = parse_bullet_paths(&slot.content);
+        out.relevant_files = parse_bullet_paths(trimmed);
+        if out.relevant_files.is_empty() {
+            // Scan for src/*.rs style paths directly in prose
+            out.relevant_files = trimmed
+                .split_whitespace()
+                .filter(|w| w.contains('/') && w.contains('.'))
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.').to_string())
+                .filter(|w| !w.is_empty())
+                .take(6)
+                .collect();
         }
     }
 
-    if let Some(slot) = trace.get("PROPOSED_APPROACH") {
-        let trimmed = slot.content.trim();
-        if !trimmed.is_empty() {
-            out.approach = Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(slot) = trace.get("FILE_EDITS") {
-        let trimmed = slot.content.trim();
-        if !trimmed.is_empty() {
-            out.file_edits = Some(trimmed.to_string());
-        }
+    if matches!(kind, StageKind::Hypothesize | StageKind::Patch) {
+        out.approach = Some(trimmed.to_string());
     }
 
     Ok(out)

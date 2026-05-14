@@ -557,8 +557,9 @@ impl App {
                 self.status = format!("kernel: {stage} [{chars_used}/{budget} chars]");
                 self.status_kind = StatusKind::Working;
             }
-            WorkerEvent::StageCompleted { stage } => {
-                self.status = format!("kernel: {stage} ✓");
+            WorkerEvent::StageCompleted { stage, crp_valid } => {
+                let marker = if crp_valid { "✓" } else { "~ (plain text)" };
+                self.status = format!("kernel: {stage} {marker}");
                 self.status_kind = StatusKind::Working;
             }
             WorkerEvent::StageRetry { stage, attempt, reason } => {
