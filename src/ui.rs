@@ -584,6 +584,27 @@ impl App {
                     format!("Kernel workflow failed: {error}"),
                 ));
             }
+            WorkerEvent::PatchApprovalRequested { path, preview, response_tx } => {
+                self.pending_tool_approval = Some(PendingToolApproval {
+                    recipient: path.clone(),
+                    summary: format!("write {path}"),
+                    response_tx,
+                });
+                self.transcript.push(TranscriptItem::system(
+                    "Patch Approval",
+                    format!("{preview}\nPress y to apply or n to skip."),
+                ));
+                self.status = "patch approval needed".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            WorkerEvent::PatchApplied { files_changed } => {
+                self.transcript.push(TranscriptItem::system(
+                    "Patch Applied",
+                    files_changed.join("\n"),
+                ));
+                self.follow_tail = true;
+            }
             // Trace events carry raw prompt/response pairs for dataset generation.
             // The TUI has no use for them — only the batch runner consumes them.
             WorkerEvent::StageSkipped { stage, reason } => {

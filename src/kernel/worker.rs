@@ -11,6 +11,8 @@ use crate::{
 };
 
 use super::context_pack::{ContextHints, ContextPack, ContextPackBuilder};
+use super::patch;
+use super::search::{SearchParams, search};
 
 // ---------------------------------------------------------------------------
 // Stage types
@@ -70,15 +72,23 @@ pub enum WorkerEvent {
     ContextPackReady { stage: String, chars_used: usize, budget: usize },
     WorkflowComplete { final_response: String },
     WorkflowFailed { error: String },
+    PatchApprovalRequested {
+        path: String,
+        preview: String,
+        response_tx: tokio::sync::oneshot::Sender<bool>,
+    },
+    PatchApplied { files_changed: Vec<String> },
     StageSkipped { stage: String, reason: String },
-    /// Full prompt/response pair for fine-tuning dataset generation.
-    /// Only emitted on successful stage completion (crp_valid or plain fallback).
+    /// Full prompt/response pair for diagnostics and fine-tuning dataset generation.
     StageTrace {
         stage: String,
+        attempt: u32,
         system_prompt: String,
         user_message: String,
         model_response: String,
         crp_valid: bool,
+        error: Option<String>,
+        finish_reason: Option<String>,
     },
 }
 
@@ -157,7 +167,7 @@ impl WorkerLoop {
         self.emit(WorkerEvent::StageStarted {
             stage: StageKind::Locate.label().into(),
         });
-        let locate_out = match self
+        let mut locate_out = match self
             .run_stage(StageKind::Locate, &task, &locate_pack)
             .await
         {
@@ -178,6 +188,10 @@ impl WorkerLoop {
                 StageOutput::default()
             }
         };
+        if locate_out.relevant_files.is_empty() {
+            locate_out.relevant_files =
+                file_hints_from_search_terms(&self.workspace, &interpret_out.search_terms);
+        }
 
         // ── Pipeline: reload index for symbol/code reads ─────────────────────
         let ws = self.workspace.clone();
@@ -233,9 +247,44 @@ impl WorkerLoop {
             crp_valid: patch_out.crp_valid,
         });
 
+        // ── Apply patch ──────────────────────────────────────────────────────
+        let mut files_changed: Vec<String> = Vec::new();
+        if let Some(ref edits) = patch_out.file_edits {
+            let directives = patch::parse_edit_directives(edits);
+            for directive in &directives {
+                let preview = patch::preview(&self.workspace, directive);
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel::<bool>();
+                self.emit(WorkerEvent::PatchApprovalRequested {
+                    path: directive.path.clone(),
+                    preview,
+                    response_tx,
+                });
+                let approved = response_rx.await.unwrap_or(false);
+                if approved {
+                    match patch::apply_directive(&self.workspace, directive) {
+                        Ok(summary) => files_changed.push(summary),
+                        Err(e) => self.emit(WorkerEvent::StageFailed {
+                            stage: "patch:apply".into(),
+                            error: e.to_string(),
+                        }),
+                    }
+                }
+            }
+            if !files_changed.is_empty() {
+                self.emit(WorkerEvent::PatchApplied {
+                    files_changed: files_changed.clone(),
+                });
+            }
+        }
+
         // ── Stage 5: REPORT ──────────────────────────────────────────────────
+        let patch_summary = if files_changed.is_empty() {
+            "No files were changed.".to_string()
+        } else {
+            files_changed.join(", ")
+        };
         let report_task = format!(
-            "{task}\n\nPatch generated. Summarize what was done and what to verify."
+            "{task}\n\nChanges applied: {patch_summary}\nSummarize what was done and what to verify."
         );
         let report_pack = ContextPackBuilder::new(&self.workspace)
             .with_budget(4_000)
@@ -274,42 +323,70 @@ impl WorkerLoop {
     ) -> Result<StageOutput> {
         let templates = crp::TemplateSet::builtin();
         let template = templates.resolve(kind.template_name(), "");
-        let system_prompt = format!(
+        let system_prompt = self.config.apply_no_think_prefix(format!(
             "{}\n\n{}\n\n---\n\n{}",
             template.render_brief(),
             one_shot_example(&kind),
             pack.formatted
-        );
+        ));
 
         let client = ModelClient::new(self.config.model.clone());
         let max_retries = self.config.harness.crp_retry_budget.max(1);
 
+        let mut user_message = task.to_string();
         for attempt in 0..=max_retries {
-            let payload = build_payload(&self.config, &system_prompt, task);
+            let payload = build_payload(&self.config, &system_prompt, &user_message);
             let result = client
                 .complete(payload)
                 .await
                 .map_err(|e| anyhow!("model call failed at stage {}: {e}", kind.label()))?;
+            let finish_reason = result.finish_reason.clone();
 
             match parse_stage_output(&result.text, &kind) {
                 Ok(out) => {
                     self.emit(WorkerEvent::StageTrace {
                         stage: kind.label().into(),
+                        attempt,
                         system_prompt: system_prompt.clone(),
-                        user_message: task.to_string(),
+                        user_message: user_message.clone(),
                         model_response: result.text.clone(),
                         crp_valid: out.crp_valid,
+                        error: None,
+                        finish_reason,
                     });
                     return Ok(out);
                 }
                 Err(reason) if attempt < max_retries => {
+                    let reason = with_finish_reason(reason, finish_reason.as_deref());
+                    self.emit(WorkerEvent::StageTrace {
+                        stage: kind.label().into(),
+                        attempt,
+                        system_prompt: system_prompt.clone(),
+                        user_message: user_message.clone(),
+                        model_response: result.text.clone(),
+                        crp_valid: false,
+                        error: Some(reason.clone()),
+                        finish_reason,
+                    });
                     self.emit(WorkerEvent::StageRetry {
                         stage: kind.label().into(),
                         attempt: attempt + 1,
                         reason: reason.clone(),
                     });
+                    user_message = retry_user_message(task, kind.label(), &reason);
                 }
                 Err(reason) => {
+                    let reason = with_finish_reason(reason, finish_reason.as_deref());
+                    self.emit(WorkerEvent::StageTrace {
+                        stage: kind.label().into(),
+                        attempt,
+                        system_prompt: system_prompt.clone(),
+                        user_message: user_message.clone(),
+                        model_response: result.text.clone(),
+                        crp_valid: false,
+                        error: Some(reason.clone()),
+                        finish_reason,
+                    });
                     self.emit(WorkerEvent::StageFailed {
                         stage: kind.label().into(),
                         error: reason.clone(),
@@ -598,4 +675,50 @@ fn parse_bullet_paths(text: &str) -> Vec<String> {
             if path.is_empty() { None } else { Some(path) }
         })
         .collect()
+}
+
+fn with_finish_reason(reason: String, finish_reason: Option<&str>) -> String {
+    let Some(finish_reason) = finish_reason.filter(|value| !value.trim().is_empty()) else {
+        return reason;
+    };
+    format!("{reason} (finish_reason: {finish_reason})")
+}
+
+fn retry_user_message(task: &str, stage: &str, reason: &str) -> String {
+    format!(
+        "{task}\n\n<RETRY_REASON>\nThe previous {stage} response was not usable: {reason}. Re-emit a concise response in the requested CRP format with a non-empty <FINAL_RESPONSE>.\n</RETRY_REASON>"
+    )
+}
+
+fn file_hints_from_search_terms(workspace: &Path, terms: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    for term in terms.iter().filter(|term| !term.trim().is_empty()).take(8) {
+        let Ok(result) = search(workspace, SearchParams::new(term)) else {
+            continue;
+        };
+        for file in result.files {
+            if files.len() >= 6 {
+                return files;
+            }
+            if !files.iter().any(|seen| seen == &file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_hints_fall_back_to_search_matches() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let terms = vec!["WorkerLoop".to_string()];
+
+        let files = file_hints_from_search_terms(workspace, &terms);
+
+        assert!(files.iter().any(|file| file == "src/kernel/worker.rs"));
+    }
 }

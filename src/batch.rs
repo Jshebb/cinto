@@ -104,6 +104,8 @@ pub async fn run(
             max_tokens: 100,
             temperature: 0.0,
             thinking_effort: "none".to_string(),
+            no_think: false,
+            no_think_prefix: "/no_think".to_string(),
             stream: false,
             stop: vec![],
             request_timeout_secs: 60,
@@ -516,8 +518,11 @@ pub async fn run_kernel(
             let _ = crate::kernel::index::save(&active_workspace, &idx);
         }
 
-        // ── Run WorkerLoop, collect events ───────────────────────────────────
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
+        // ── Run WorkerLoop with concurrent event handler ─────────────────────
+        // Approvals must be answered during the workflow (the worker awaits
+        // response_rx), so we drain events in a separate task rather than
+        // collecting them post-hoc.
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
         let mut kernel_config = config.clone();
         kernel_config.harness.workspace = active_workspace.clone();
 
@@ -525,15 +530,30 @@ pub async fn run_kernel(
         if let Some(b) = budget {
             worker = worker.with_budget(b);
         }
+
+        // Spawn event consumer — auto-approves patches, records all other events.
+        let event_handle: tokio::task::JoinHandle<Vec<WorkerEvent>> =
+            tokio::spawn(async move {
+                let mut rx = event_rx;
+                let mut recorded = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        WorkerEvent::PatchApprovalRequested { path, response_tx, .. } => {
+                            println!("  [auto-approve] write {path}");
+                            let _ = response_tx.send(true);
+                        }
+                        e => recorded.push(e),
+                    }
+                }
+                recorded
+            });
+
         let start = Instant::now();
         let workflow_result = worker.run_bugfix().await;
         let total_duration_ms = start.elapsed().as_millis();
 
-        // ── Collect all events ───────────────────────────────────────────────
-        let mut events = Vec::new();
-        while let Ok(e) = event_rx.try_recv() {
-            events.push(e);
-        }
+        // event_tx dropped when WorkerLoop is consumed — signals handler to finish.
+        let events = event_handle.await.unwrap_or_default();
 
         // ── Build per-stage results from events ──────────────────────────────
         let mut stage_results: std::collections::HashMap<String, KernelStageResult> =
@@ -584,24 +604,33 @@ pub async fn run_kernel(
                 WorkerEvent::WorkflowFailed { error } => {
                     errors.push(error.clone());
                 }
+                WorkerEvent::PatchApplied { files_changed } => {
+                    println!("  [patch] {}", files_changed.join(", "));
+                }
                 WorkerEvent::StageSkipped { stage, reason } => {
                     errors.push(format!("{stage} skipped: {reason}"));
                 }
                 WorkerEvent::StageTrace {
                     stage,
+                    attempt,
                     system_prompt,
                     user_message,
                     model_response,
                     crp_valid,
+                    error,
+                    finish_reason,
                 } => {
                     pending_traces.push(serde_json::json!({
                         "task_id": task.id,
                         "model": config.model.model,
                         "stage": stage,
+                        "attempt": attempt,
                         "system_prompt": system_prompt,
                         "user_message": user_message,
                         "model_response": model_response,
                         "crp_valid": crp_valid,
+                        "error": error,
+                        "finish_reason": finish_reason,
                         "workflow_succeeded": workflow_result.is_ok(),
                         "timestamp": timestamp,
                     }));
