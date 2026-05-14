@@ -427,7 +427,21 @@ fn build_payload(config: &Config, system_prompt: &str, user_message: &str) -> Ch
 // Stage output parsing
 // ---------------------------------------------------------------------------
 
+/// Strip `<think>...</think>` blocks emitted by reasoning models (Qwen3, DeepSeek-R1, etc.)
+/// before attempting to parse the response. Returns the text after the last closing tag,
+/// or the full text if no think block is present.
+fn strip_think_blocks(text: &str) -> &str {
+    // Find the last </think> tag — the actual response comes after it.
+    if let Some(end) = text.rfind("</think>") {
+        text[end + "</think>".len()..].trim_start()
+    } else {
+        text
+    }
+}
+
 fn parse_stage_output(raw: &str, kind: &StageKind) -> Result<StageOutput, String> {
+    let raw = strip_think_blocks(raw);
+
     // Try structured CRP first.
     if let Ok(trace) = crp::parse(raw) {
         let final_response = trace
