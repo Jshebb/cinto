@@ -584,6 +584,9 @@ pub async fn run_kernel(
                 WorkerEvent::WorkflowFailed { error } => {
                     errors.push(error.clone());
                 }
+                WorkerEvent::StageSkipped { stage, reason } => {
+                    errors.push(format!("{stage} skipped: {reason}"));
+                }
                 WorkerEvent::StageTrace {
                     stage,
                     system_prompt,

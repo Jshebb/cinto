@@ -586,6 +586,12 @@ impl App {
             }
             // Trace events carry raw prompt/response pairs for dataset generation.
             // The TUI has no use for them — only the batch runner consumes them.
+            WorkerEvent::StageSkipped { stage, reason } => {
+                self.transcript.push(TranscriptItem::system(
+                    format!("Kernel skipped — {stage}"),
+                    format!("{reason}\nContinuing with search-based context."),
+                ));
+            }
             WorkerEvent::StageTrace { .. } => {}
         }
     }

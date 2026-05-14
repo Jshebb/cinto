@@ -70,6 +70,7 @@ pub enum WorkerEvent {
     ContextPackReady { stage: String, chars_used: usize, budget: usize },
     WorkflowComplete { final_response: String },
     WorkflowFailed { error: String },
+    StageSkipped { stage: String, reason: String },
     /// Full prompt/response pair for fine-tuning dataset generation.
     /// Only emitted on successful stage completion (crp_valid or plain fallback).
     StageTrace {
@@ -156,13 +157,27 @@ impl WorkerLoop {
         self.emit(WorkerEvent::StageStarted {
             stage: StageKind::Locate.label().into(),
         });
-        let locate_out = self
+        let locate_out = match self
             .run_stage(StageKind::Locate, &task, &locate_pack)
-            .await?;
-        self.emit(WorkerEvent::StageCompleted {
-            stage: StageKind::Locate.label().into(),
-            crp_valid: locate_out.crp_valid,
-        });
+            .await
+        {
+            Ok(out) => {
+                self.emit(WorkerEvent::StageCompleted {
+                    stage: StageKind::Locate.label().into(),
+                    crp_valid: out.crp_valid,
+                });
+                out
+            }
+            Err(e) => {
+                // Locate failed — skip it and let hypothesize use interpret's
+                // search terms to find code context via the context pack.
+                self.emit(WorkerEvent::StageSkipped {
+                    stage: StageKind::Locate.label().into(),
+                    reason: e.to_string(),
+                });
+                StageOutput::default()
+            }
+        };
 
         // ── Pipeline: reload index for symbol/code reads ─────────────────────
         let ws = self.workspace.clone();
