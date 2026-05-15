@@ -250,12 +250,11 @@ fn resolve(workspace: &Path, rel_path: &str) -> Result<std::path::PathBuf> {
     Ok(normalised)
 }
 
-/// Replace a named function (or struct/impl/trait) body in `source`.
-/// Uses brace-depth tracking — language-agnostic and good enough for MVP.
+/// Replace a named function/class/struct in `source`.
+/// Detects Python (indentation-based) vs brace languages automatically.
 fn replace_function_body(source: &str, name: &str, new_body: &str) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
 
-    // Find the line that declares the target symbol.
     let start_idx = lines.iter().position(|l| {
         let t = l.trim();
         t.contains(name)
@@ -267,9 +266,52 @@ fn replace_function_body(source: &str, name: &str, new_body: &str) -> Option<Str
                 || t.contains("func "))
     })?;
 
-    // Walk forward to find the opening brace / colon and matching close.
+    // Detect Python by checking if the declaration line ends with ':' (after stripping comments)
+    let decl = lines[start_idx].trim();
+    let is_python = decl.ends_with(':')
+        || decl.split('#').next().unwrap_or("").trim().ends_with(':');
+
+    let end_idx = if is_python {
+        find_python_end(&lines, start_idx)
+    } else {
+        find_brace_end(&lines, start_idx)?
+    };
+
+    let mut result = String::new();
+    if start_idx > 0 {
+        result.push_str(&lines[..start_idx].join("\n"));
+        result.push('\n');
+    }
+    result.push_str(new_body.trim_end());
+    result.push('\n');
+    if end_idx < lines.len() {
+        result.push('\n');
+        result.push_str(&lines[end_idx..].join("\n"));
+        result.push('\n');
+    }
+
+    Some(result)
+}
+
+fn find_python_end(lines: &[&str], start_idx: usize) -> usize {
+    let base_indent = lines[start_idx].len() - lines[start_idx].trim_start().len();
+
+    for i in (start_idx + 1)..lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= base_indent {
+            return i;
+        }
+    }
+    lines.len()
+}
+
+fn find_brace_end(lines: &[&str], start_idx: usize) -> Option<usize> {
     let mut depth: i32 = 0;
-    let mut end_idx = start_idx;
     let mut found_open = false;
 
     for (i, line) in lines[start_idx..].iter().enumerate() {
@@ -282,28 +324,10 @@ fn replace_function_body(source: &str, name: &str, new_body: &str) -> Option<Str
             }
         }
         if found_open && depth == 0 {
-            end_idx = start_idx + i;
-            break;
+            return Some(start_idx + i + 1);
         }
     }
-
-    if !found_open {
-        return None;
-    }
-
-    let mut result = lines[..start_idx].join("\n");
-    if start_idx > 0 {
-        result.push('\n');
-    }
-    result.push_str(new_body.trim_end());
-    result.push('\n');
-    if end_idx + 1 < lines.len() {
-        result.push('\n');
-        result.push_str(&lines[end_idx + 1..].join("\n"));
-        result.push('\n');
-    }
-
-    Some(result)
+    None
 }
 
 // Small helper to avoid a `let` binding just for piping.
