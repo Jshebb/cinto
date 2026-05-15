@@ -228,8 +228,15 @@ impl WorkerLoop {
             Some(a) => format!("{task}\n\nApproach:\n{a}"),
             None => task.clone(),
         };
+        // Give the patch stage full file content — a model writing a `replace`
+        // edit must see the whole file or it will overwrite context it can't infer.
         let patch_hints = ContextHints {
             files: locate_out.relevant_files.clone(),
+            ranges: locate_out
+                .relevant_files
+                .iter()
+                .map(|f| (f.clone(), 1, 300))
+                .collect(),
             ..Default::default()
         };
         let patch_pack = self.builder()
