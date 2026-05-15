@@ -444,6 +444,39 @@ pub async fn run_kernel(
         println!("Kernel batch DRY-RUN: validating task file only.");
     }
 
+    // ── Context window detection ─────────────────────────────────────────────
+    // Detect the actual context window from the server before running tasks.
+    // LM Studio loads models with a fixed n_ctx set in the GUI — if it differs
+    // from config.model.context_window, the config is lying and we'll overflow.
+    let effective_budget = if !dry_run {
+        let client = ModelClient::new(config.model.clone());
+        match client.get_available_context_window().await {
+            actual if actual > 0 && actual < config.model.context_window => {
+                eprintln!(
+                    "WARNING: server reports {}K context but config expects {}K.",
+                    actual / 1024,
+                    config.model.context_window / 1024,
+                );
+                eprintln!(
+                    "  → Reload the model in LM Studio with context length: {}",
+                    config.model.context_window
+                );
+                eprintln!(
+                    "  → Using detected context ({} tokens) to size the budget.",
+                    actual
+                );
+                // Reserve ~30% for system/CRP/examples overhead and output.
+                // Remaining 70% at 4 chars/token = available context pack budget.
+                let chars = (actual as usize).saturating_sub(actual as usize * 30 / 100) * 4;
+                budget.unwrap_or(chars)
+            }
+            _ => budget.unwrap_or(crate::kernel::context_pack::DEFAULT_CODE_BUDGET),
+        }
+    } else {
+        budget.unwrap_or(crate::kernel::context_pack::DEFAULT_CODE_BUDGET)
+    };
+    println!("Context pack budget: {} chars", effective_budget);
+
     let file = std::fs::File::open(&tasks_path)
         .with_context(|| format!("failed to open {}", tasks_path.display()))?;
     let reader = BufReader::new(file);
@@ -532,9 +565,7 @@ pub async fn run_kernel(
         kernel_config.harness.workspace = active_workspace.clone();
 
         let mut worker = WorkerLoop::new(&active_workspace, kernel_config, task.prompt.clone(), event_tx);
-        if let Some(b) = budget {
-            worker = worker.with_budget(b);
-        }
+        worker = worker.with_budget(effective_budget);
 
         // Spawn event consumer — auto-approves patches, records all other events.
         let event_handle: tokio::task::JoinHandle<Vec<WorkerEvent>> =
