@@ -8,3 +8,5 @@ docs/obsidian/
 eval/results/
 eval/traces/
 eval/training/
+**/__pycache__/
+**/*.pyc
