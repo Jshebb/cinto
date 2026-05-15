@@ -28,6 +28,98 @@ impl ModelClient {
         Self { http, config }
     }
 
+    pub async fn detect_context_window(&self) -> Result<Option<u32>> {
+        let base_endpoint = model_base_endpoint(&self.config.endpoint);
+        for endpoint in [
+            format!("{base_endpoint}/v1/models"),
+            format!("{base_endpoint}/api/v0/models"),
+        ] {
+            if let Some(context_window) =
+                self.detect_context_from_models_endpoint(&endpoint).await?
+            {
+                return Ok(Some(context_window));
+            }
+        }
+
+        self.detect_context_from_ollama_show(&base_endpoint).await
+    }
+
+    /// Gets the maximum context window size for a model.
+    /// Tries automatic detection first, then falls back to provider-specific defaults (halved).
+    /// If configured context_window is smaller than what's available, uses the configured value.
+    pub async fn get_available_context_window(&self) -> u32 {
+        if let Some(detected) = self.detect_context_window().await.ok().flatten() {
+            // If configured context_window is set, trust it (it might be intentionally larger or smaller than detected)
+            if self.config.context_window > 0 {
+                return self.config.context_window;
+            }
+            return detected;
+        }
+
+        // Detection failed - use configured value directly if set, otherwise provider default
+        if self.config.context_window > 0 {
+            return self.config.context_window;
+        }
+        self.provider_default_context_limit()
+    }
+
+    /// Gets the default context limit for this provider when detection fails.
+    fn provider_default_context_limit(&self) -> u32 {
+        let endpoint = self.config.endpoint.to_lowercase();
+
+        if endpoint.contains("lm-studio") || endpoint.contains("lmstudio") {
+            131072
+        } else if endpoint.contains("ollama") {
+            131072
+        } else if endpoint.contains("vllm") || endpoint.contains("llama.cpp") {
+            1048576
+        } else {
+            131072 // Default for unknown providers (e.g. Gemini, Anthropic)
+        }
+    }
+
+    async fn detect_context_from_models_endpoint(&self, endpoint: &str) -> Result<Option<u32>> {
+        let response = match self.authorize(self.http.get(endpoint)).send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to decode models response")?;
+        let Some(model) = select_model_info(&body, &self.config.model) else {
+            return Ok(None);
+        };
+        Ok(extract_context_window(model))
+    }
+
+    async fn detect_context_from_ollama_show(&self, base_endpoint: &str) -> Result<Option<u32>> {
+        let endpoint = format!("{base_endpoint}/api/show");
+        let request = serde_json::json!({ "model": &self.config.model });
+        let response = match self
+            .authorize(self.http.post(&endpoint))
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to decode Ollama model response")?;
+        Ok(extract_context_window(&body))
+    }
+
     pub async fn complete(&self, payload: ChatRequestPayload) -> Result<CompletionResult> {
         let endpoint = normalize_endpoint(&self.config.endpoint, &payload.mode);
         match payload.mode {
@@ -107,15 +199,15 @@ impl ModelClient {
                 .json()
                 .await
                 .context("failed to decode completion response")?;
-            let text = body
+            let choice = body
                 .choices
                 .into_iter()
                 .next()
-                .map(|choice| choice.text)
                 .context("completion response had no choices")?;
             Ok(CompletionResult {
-                text,
+                text: choice.text,
                 tool_calls: Vec::new(),
+                finish_reason: choice.finish_reason,
             })
         }
     }
@@ -194,6 +286,7 @@ impl ModelClient {
             Ok(CompletionResult {
                 text: choice.message.content.unwrap_or_default(),
                 tool_calls: choice.message.tool_calls.unwrap_or_default(),
+                finish_reason: choice.finish_reason,
             })
         }
     }
@@ -217,6 +310,88 @@ impl ModelClient {
             Some(value.to_string())
         }
     }
+}
+
+fn model_base_endpoint(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/v1/chat/completions")
+        .trim_end_matches("/v1/completions")
+        .trim_end_matches("/v1")
+        .to_string()
+}
+
+fn select_model_info<'a>(
+    body: &'a serde_json::Value,
+    configured_model: &str,
+) -> Option<&'a serde_json::Value> {
+    let models = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| body.as_array())?;
+    models
+        .iter()
+        .find(|model| {
+            model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id == configured_model)
+        })
+        .or_else(|| {
+            if models.len() == 1 {
+                models.first()
+            } else {
+                None
+            }
+        })
+}
+
+fn extract_context_window(model: &serde_json::Value) -> Option<u32> {
+    const CONTEXT_FIELDS: &[&str] = &[
+        "context_length",
+        "context_window",
+        "max_context_length",
+        "max_model_len",
+        "max_sequence_length",
+        "max_position_embeddings",
+        "input_token_limit",
+        "n_ctx",
+        "num_ctx",
+    ];
+    const CONTAINERS: &[&str] = &["metadata", "config", "details", "model_info", "parameters"];
+
+    find_context_field(model, CONTEXT_FIELDS).or_else(|| {
+        CONTAINERS.iter().find_map(|container| {
+            model
+                .get(*container)
+                .and_then(|value| find_context_field(value, CONTEXT_FIELDS))
+        })
+    })
+}
+
+fn find_context_field(value: &serde_json::Value, fields: &[&str]) -> Option<u32> {
+    let object = value.as_object()?;
+    object.iter().find_map(|(key, value)| {
+        let matches_field = fields.iter().any(|field| {
+            key == field
+                || key
+                    .strip_suffix(field)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        });
+        matches_field
+            .then_some(value)
+            .and_then(context_value_as_u32)
+    })
+}
+
+fn context_value_as_u32(value: &serde_json::Value) -> Option<u32> {
+    let raw = value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    })?;
+    u32::try_from(raw).ok().filter(|tokens| *tokens > 0)
 }
 
 async fn require_success(response: reqwest::Response, endpoint: &str) -> Result<reqwest::Response> {
@@ -256,6 +431,7 @@ async fn collect_stream(
     let mut buffer = String::new();
     let mut full = String::new();
     let mut tool_calls: Vec<PartialToolCall> = Vec::new();
+    let mut finish_reason: Option<String> = None;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("failed while streaming from {endpoint}"))?;
@@ -263,12 +439,24 @@ async fn collect_stream(
 
         while let Some(newline) = buffer.find('\n') {
             let line = buffer.drain(..=newline).collect::<String>();
-            process_sse_line(line.trim(), delta_tx.as_ref(), &mut full, &mut tool_calls)?;
+            process_sse_line(
+                line.trim(),
+                delta_tx.as_ref(),
+                &mut full,
+                &mut tool_calls,
+                &mut finish_reason,
+            )?;
         }
     }
 
     if !buffer.trim().is_empty() {
-        process_sse_line(buffer.trim(), delta_tx.as_ref(), &mut full, &mut tool_calls)?;
+        process_sse_line(
+            buffer.trim(),
+            delta_tx.as_ref(),
+            &mut full,
+            &mut tool_calls,
+            &mut finish_reason,
+        )?;
     }
 
     Ok(CompletionResult {
@@ -277,6 +465,7 @@ async fn collect_stream(
             .into_iter()
             .filter_map(PartialToolCall::finish)
             .collect(),
+        finish_reason,
     })
 }
 
@@ -285,6 +474,7 @@ fn process_sse_line(
     delta_tx: Option<&UnboundedSender<String>>,
     full: &mut String,
     tool_calls: &mut Vec<PartialToolCall>,
+    finish_reason: &mut Option<String>,
 ) -> Result<()> {
     let Some(data) = line.strip_prefix("data:") else {
         return Ok(());
@@ -298,6 +488,13 @@ fn process_sse_line(
         serde_json::from_str(data).context("failed to parse stream chunk")?;
     let choice = value.get("choices").and_then(|choices| choices.get(0));
     if let Some(choice) = choice {
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(serde_json::Value::as_str)
+            && !reason.is_empty()
+        {
+            *finish_reason = Some(reason.to_string());
+        }
         if let Some(delta) = extract_delta(choice)
             && !delta.is_empty()
         {
@@ -421,6 +618,8 @@ struct CompletionResponse {
 #[derive(Debug, Deserialize)]
 struct CompletionChoice {
     text: String,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,6 +662,8 @@ struct ChatCompletionResponse {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChoice {
     message: ChatCompletionMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -494,5 +695,68 @@ mod tests {
             normalize_endpoint("http://127.0.0.1:1234/v1/completions", &mode),
             "http://127.0.0.1:1234/v1/completions"
         );
+    }
+
+    #[test]
+    fn captures_stream_finish_reason() {
+        let mut full = String::new();
+        let mut tool_calls = Vec::new();
+        let mut finish_reason = None;
+
+        process_sse_line(
+            r#"data: {"choices":[{"delta":{"content":"hello"},"finish_reason":"length"}]}"#,
+            None,
+            &mut full,
+            &mut tool_calls,
+            &mut finish_reason,
+        )
+        .expect("stream line");
+
+        assert_eq!(full, "hello");
+        assert_eq!(finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn extracts_context_window_from_common_model_fields() {
+        let model = serde_json::json!({
+            "id": "qwen",
+            "metadata": {
+                "max_model_len": 131072
+            }
+        });
+
+        assert_eq!(extract_context_window(&model), Some(131072));
+    }
+
+    #[test]
+    fn extracts_namespaced_ollama_context_window() {
+        let model = serde_json::json!({
+            "model_info": {
+                "llama.context_length": 98304
+            }
+        });
+
+        assert_eq!(extract_context_window(&model), Some(98304));
+    }
+
+    #[test]
+    fn selects_exact_model_or_single_available_model() {
+        let body = serde_json::json!({
+            "data": [
+                { "id": "a", "context_length": 8192 },
+                { "id": "b", "context_length": 65536 }
+            ]
+        });
+
+        let selected = select_model_info(&body, "b").expect("model b");
+        assert_eq!(extract_context_window(selected), Some(65536));
+
+        let single = serde_json::json!({
+            "data": [
+                { "id": "served-model", "num_ctx": "32768" }
+            ]
+        });
+        let selected = select_model_info(&single, "configured-alias").expect("single model");
+        assert_eq!(extract_context_window(selected), Some(32768));
     }
 }

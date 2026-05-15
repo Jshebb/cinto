@@ -44,6 +44,14 @@ session adapter is built. The file is appended to the developer instructions for
 both Harmony and OpenAI tool-calling adapters, so project context applies across
 model formats. The loaded content is bounded to keep prompt size predictable.
 
+## Reasoning Protocol
+
+The draft Cinto Reasoning Protocol (CRP) is documented in
+[CRP_SPEC.md](CRP_SPEC.md). CRP is a proposed structured-output layer for
+typed, auditable reasoning traces. It is not implemented in the current runtime
+yet; the first implementation milestone should start with a parser, slot
+validator, and retry feedback loop before any model fine-tuning work.
+
 ## Tool Policy
 
 Milestone 1 exposes workspace tools:
@@ -65,9 +73,10 @@ session. `write_file` and `delete_file` are intentionally narrow: they only
 mutate regular files beneath the configured workspace. They require explicit TUI
 approval by default unless `harness.require_edit_approval` is disabled.
 
-Tool loops are capped by `harness.max_tool_turns`, which defaults to 16. Tool
-execution errors are returned to the model as tool output so the model can
-recover instead of crashing the UI turn.
+Tool execution is capped by `harness.max_tool_turns`, while total model calls,
+CRP repair attempts, empty-response retries, and transport retries each use
+their own budgets. Tool execution errors are returned to the model as tool
+output so the model can recover instead of crashing the UI turn.
 
 Milestone 2 should add a diff preview and a user approval step around write
 tools.

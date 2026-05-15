@@ -1,0 +1,18 @@
+# Use the official Rust image as a builder
+FROM rust:1.77 as builder
+WORKDIR /usr/src/cinto
+COPY . .
+RUN cargo build --release
+
+# Run stage
+FROM debian:bookworm-slim
+# Install basic dependencies for eval (git, nodejs, etc if needed by fixtures)
+RUN apt-get update && apt-get install -y git ca-certificates curl build-essential && rm -rf /var/lib/apt/lists/*
+# Install rust in the runtime image because we run `cargo test` in eval jobs!
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+COPY --from=builder /usr/src/cinto/target/release/cinto /usr/local/bin/cinto
+
+WORKDIR /eval
+ENTRYPOINT ["cinto", "batch", "--dangerously-auto-approve"]

@@ -340,6 +340,7 @@ mod tests {
                     arguments: "{\"path\":\"x\"}".into(),
                 },
             }],
+            finish_reason: None,
         };
         assert_eq!(
             adapter.parse_response(&raw),

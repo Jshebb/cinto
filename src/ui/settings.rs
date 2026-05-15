@@ -9,17 +9,23 @@ pub(super) enum SettingField {
     Endpoint,
     Model,
     Format,
+    ReasoningProtocol,
     ApiKeyEnv,
     MaxTokens,
     Temperature,
     ThinkingEffort,
     Stream,
     Timeout,
+    ContextWindow,
     AutoContextCompression,
     ContextCompressionThreshold,
     ContextCompressionKeepRecent,
     WorkspaceInstructions,
     ToolTurns,
+    ModelRounds,
+    CrpRetries,
+    TransportRetries,
+    EmptyResponseRetries,
     Stop,
     Workspace,
     EditApproval,
@@ -28,21 +34,27 @@ pub(super) enum SettingField {
     DeveloperPrompt,
 }
 
-pub(super) const SETTINGS: [SettingField; 20] = [
+pub(super) const SETTINGS: [SettingField; 26] = [
     SettingField::Endpoint,
     SettingField::Model,
     SettingField::Format,
+    SettingField::ReasoningProtocol,
     SettingField::ApiKeyEnv,
     SettingField::MaxTokens,
     SettingField::Temperature,
     SettingField::ThinkingEffort,
     SettingField::Stream,
     SettingField::Timeout,
+    SettingField::ContextWindow,
     SettingField::AutoContextCompression,
     SettingField::ContextCompressionThreshold,
     SettingField::ContextCompressionKeepRecent,
     SettingField::WorkspaceInstructions,
     SettingField::ToolTurns,
+    SettingField::ModelRounds,
+    SettingField::CrpRetries,
+    SettingField::TransportRetries,
+    SettingField::EmptyResponseRetries,
     SettingField::Stop,
     SettingField::Workspace,
     SettingField::EditApproval,
@@ -53,6 +65,7 @@ pub(super) const SETTINGS: [SettingField; 20] = [
 
 const THINKING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
 const FORMATS: [&str; 2] = ["harmony", "openai-tools"];
+const REASONING_PROTOCOLS: [&str; 2] = ["crp", "plain"];
 
 impl SettingField {
     pub(super) fn label(self) -> &'static str {
@@ -60,17 +73,23 @@ impl SettingField {
             SettingField::Endpoint => "endpoint",
             SettingField::Model => "model",
             SettingField::Format => "format",
+            SettingField::ReasoningProtocol => "reasoning",
             SettingField::ApiKeyEnv => "api key env",
             SettingField::MaxTokens => "max tokens",
             SettingField::Temperature => "temperature",
             SettingField::ThinkingEffort => "thinking",
             SettingField::Stream => "stream",
             SettingField::Timeout => "timeout secs",
+            SettingField::ContextWindow => "context window",
             SettingField::AutoContextCompression => "auto context compression",
             SettingField::ContextCompressionThreshold => "context compression %",
             SettingField::ContextCompressionKeepRecent => "context keep recent",
             SettingField::WorkspaceInstructions => "workspace instructions",
             SettingField::ToolTurns => "tool turns",
+            SettingField::ModelRounds => "model rounds",
+            SettingField::CrpRetries => "crp retries",
+            SettingField::TransportRetries => "transport retries",
+            SettingField::EmptyResponseRetries => "empty response retries",
             SettingField::Stop => "stop",
             SettingField::Workspace => "workspace",
             SettingField::EditApproval => "edit approval",
@@ -85,12 +104,14 @@ impl SettingField {
             SettingField::Endpoint => config.model.endpoint.clone(),
             SettingField::Model => config.model.model.clone(),
             SettingField::Format => config.model.format.clone(),
+            SettingField::ReasoningProtocol => config.harness.reasoning_protocol.clone(),
             SettingField::ApiKeyEnv => config.model.api_key_env.clone().unwrap_or_default(),
             SettingField::MaxTokens => config.model.max_tokens.to_string(),
             SettingField::Temperature => format!("{:.2}", config.model.temperature),
             SettingField::ThinkingEffort => config.model.thinking_effort.clone(),
             SettingField::Stream => config.model.stream.to_string(),
             SettingField::Timeout => config.model.request_timeout_secs.to_string(),
+            SettingField::ContextWindow => config.model.context_window.to_string(),
             SettingField::AutoContextCompression => {
                 config.harness.auto_context_compression.to_string()
             }
@@ -104,6 +125,12 @@ impl SettingField {
                 config.harness.load_workspace_instructions.to_string()
             }
             SettingField::ToolTurns => config.harness.max_tool_turns.to_string(),
+            SettingField::ModelRounds => config.harness.max_model_rounds.to_string(),
+            SettingField::CrpRetries => config.harness.crp_retry_budget.to_string(),
+            SettingField::TransportRetries => config.harness.transport_retry_budget.to_string(),
+            SettingField::EmptyResponseRetries => {
+                config.harness.empty_response_retry_budget.to_string()
+            }
             SettingField::Stop => config.model.stop.join(","),
             SettingField::Workspace => config.harness.workspace.display().to_string(),
             SettingField::EditApproval => config.harness.require_edit_approval.to_string(),
@@ -123,6 +150,13 @@ impl SettingField {
                     return Err(anyhow!("format must be one of harmony, openai-tools"));
                 }
                 config.model.format = value;
+            }
+            SettingField::ReasoningProtocol => {
+                let value = value.trim().to_ascii_lowercase();
+                if !REASONING_PROTOCOLS.contains(&value.as_str()) {
+                    return Err(anyhow!("reasoning must be one of crp, plain"));
+                }
+                config.harness.reasoning_protocol = value;
             }
             SettingField::ApiKeyEnv => {
                 let value = value.trim().to_string();
@@ -153,6 +187,9 @@ impl SettingField {
             SettingField::Timeout => {
                 config.model.request_timeout_secs = parse_number(&value, "timeout secs")?;
             }
+            SettingField::ContextWindow => {
+                config.model.context_window = parse_number(&value, "context window")?;
+            }
             SettingField::AutoContextCompression => {
                 config.harness.auto_context_compression = value
                     .trim()
@@ -178,6 +215,19 @@ impl SettingField {
             }
             SettingField::ToolTurns => {
                 config.harness.max_tool_turns = parse_number(&value, "tool turns")?;
+            }
+            SettingField::ModelRounds => {
+                config.harness.max_model_rounds = parse_number(&value, "model rounds")?;
+            }
+            SettingField::CrpRetries => {
+                config.harness.crp_retry_budget = parse_number(&value, "crp retries")?;
+            }
+            SettingField::TransportRetries => {
+                config.harness.transport_retry_budget = parse_number(&value, "transport retries")?;
+            }
+            SettingField::EmptyResponseRetries => {
+                config.harness.empty_response_retry_budget =
+                    parse_number(&value, "empty response retries")?;
             }
             SettingField::Stop => {
                 config.model.stop = value
@@ -257,6 +307,15 @@ pub(super) fn next_format(current: &str) -> String {
         .position(|format| *format == current)
         .unwrap_or(0);
     FORMATS[(index + 1) % FORMATS.len()].to_string()
+}
+
+pub(super) fn next_reasoning_protocol(current: &str) -> String {
+    let current = current.trim().to_ascii_lowercase();
+    let index = REASONING_PROTOCOLS
+        .iter()
+        .position(|protocol| *protocol == current)
+        .unwrap_or(0);
+    REASONING_PROTOCOLS[(index + 1) % REASONING_PROTOCOLS.len()].to_string()
 }
 
 fn non_empty(value: String, label: &str) -> Result<String> {

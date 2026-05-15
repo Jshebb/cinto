@@ -1,0 +1,31 @@
+# Cinto preset: vLLM / OpenAI-compatible
+# vLLM or any server exposing the OpenAI chat API.
+
+[model]
+endpoint = "http://127.0.0.1:8000"
+model = "Qwen/Qwen2.5-Coder-32B-Instruct"
+format = "openai-tools"
+max_tokens = 4096
+temperature = 0.2
+thinking_effort = "none"
+stream = true
+stop = []
+request_timeout_secs = 600
+context_window = 65536
+
+[harness]
+workspace = "."
+allow_shell = false
+require_edit_approval = true
+reasoning_protocol = "crp"
+crp_retry_budget = 3
+transport_retry_budget = 1
+empty_response_retry_budget = 1
+max_tool_turns = 24
+max_model_rounds = 64
+auto_context_compression = true
+context_compression_threshold = 80
+context_compression_keep_recent = 18
+load_workspace_instructions = true
+system_prompt = "You are Cinto, a local coding agent running in a terminal UI. You help the user understand and modify the current workspace."
+developer_prompt = "Use concise reasoning, ask before destructive actions, and prefer small verifiable edits. When you need repository context, request tools in the commentary channel. Treat <CINTO_TOOL_OUTPUT_END> as the end of tool output; do not continue or echo tool output after that marker. If a tool result says it was compacted, use search or narrower reads for missing details. Treat <CINTO_CONTEXT_COMPACTED> as a concise note about earlier conversation history; rely on recent messages for exact details."

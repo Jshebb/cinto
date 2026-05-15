@@ -1,6 +1,6 @@
 # Cinto
 
-[English](README.md) · [Notas de arquitetura](docs/architecture.md)
+[English](README.md) · [Notas de arquitetura](docs/architecture.md) · [Spec CRP](docs/CRP_SPEC.md)
 
 ![Cinto TUI](docs/demo.png)
 
@@ -26,6 +26,8 @@ A maioria dos agentes esconde o harness. O Cinto deixa a engrenagem visível.
 - **Contexto persistente:** suporte opcional a `AGENTS.md` na raiz do projeto.
 - **Gestão de contexto:** resultados grandes e histórico antigo são compactados
   antes de estourar a janela do modelo.
+- **Protocolo de raciocínio:** CRP explora traces tipados e auditáveis para
+  agentes de código pequenos ou comprimidos.
 
 ## Instalação
 
@@ -126,8 +128,8 @@ texto.
 
 | Servidor | Endpoint | Formato recomendado | Observação |
 | --- | --- | --- | --- |
-| LM Studio com `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Use o model id mostrado pelo LM Studio. |
-| LM Studio com Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Use `thinking_effort = "none"`. |
+| LM Studio com `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Transporte padrão. Reasoning CRP vem ligado por padrão. |
+| LM Studio com Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Use `thinking_effort = "none"`; para modelos Qwen3, use `no_think = true`. |
 | Ollama | `http://127.0.0.1:11434` | `openai-tools` | Use um modelo com tools, como `qwen2.5-coder:7b-instruct`. |
 
 Exemplo com Ollama:
@@ -145,6 +147,7 @@ endpoint = "http://127.0.0.1:11434"
 model = "qwen2.5-coder:7b-instruct"
 format = "openai-tools"
 thinking_effort = "none"
+no_think = false
 ```
 
 ## Fluxo no TUI
@@ -222,6 +225,8 @@ api_key_env = ""
 max_tokens = 4096
 temperature = 0.2
 thinking_effort = "medium"    # none, low, medium, high
+no_think = false              # prefixa no_think_prefix nos system prompts quando true
+no_think_prefix = "/no_think" # use "<no_think>" se o template/servidor exigir
 stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600
@@ -231,6 +236,7 @@ context_window = 8192
 workspace = "/home/you/project"
 allow_shell = false
 require_edit_approval = true
+reasoning_protocol = "crp"    # crp ou plain
 max_tool_turns = 16
 auto_context_compression = true
 context_compression_threshold = 80
@@ -243,12 +249,16 @@ developer_prompt = "Use concise reasoning, ask before destructive actions, and p
 Quando `api_key_env` é definido, o Cinto lê o segredo dessa variável de ambiente
 e envia como bearer token. O TUI salva só o nome da variável, não o segredo.
 
-## Formatos Suportados
+## Formatos E Reasoning
 
 | Formato | Shape de tool-calling | Melhor uso |
 | --- | --- | --- |
 | `harmony` | Tool calls embutidos no texto Harmony | `gpt-oss-20b`, `gpt-oss-120b` e servidores compatíveis com Harmony |
 | `openai-tools` | Campos `tools` e `tool_calls` compatíveis com OpenAI | Qwen, Llama, Ollama, LM Studio e servidores chat compatíveis |
+
+`harness.reasoning_protocol = "crp"` vem ligado por padrão e funciona com os
+dois formatos de tool-call. Ele pede respostas finais como traces CRP, enquanto
+a invocação de tools continua no transporte escolhido.
 
 Se o modelo fica chamando tools sem responder, aumente `max_tool_turns` ou peça
 uma tarefa menor. Se o modelo não retorna texto nem tool call, o Cinto mostra um

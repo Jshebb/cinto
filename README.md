@@ -8,7 +8,7 @@ servers.** It gives local and open-weight models a focused workspace loop:
 read files, search code, propose edits, keep todos, inspect prompts, and stay
 inside explicit safety rails.
 
-[Português](README_pt.md) · [Architecture notes](docs/architecture.md)
+[Português](README_pt.md) · [Architecture notes](docs/architecture.md) · [CRP spec](docs/CRP_SPEC.md)
 
 ![Cinto TUI](docs/demo.png)
 
@@ -30,6 +30,8 @@ Most coding agents hide the harness. Cinto keeps it visible.
   workspace root.
 - **Context management:** large tool outputs and older transcript history are
   compacted before they overwhelm the model context window.
+- **Reasoning protocol draft:** CRP explores typed, auditable reasoning traces
+  for small and compressed coding agents.
 
 ## Install
 
@@ -129,8 +131,8 @@ explicit `/v1/completions` endpoint for text-completion servers.
 
 | Server | Example endpoint | Recommended format | Notes |
 | --- | --- | --- | --- |
-| LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Use the model id shown by LM Studio. |
-| LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`. |
+| LM Studio with `gpt-oss` | `http://127.0.0.1:1234` | `harmony` | Default transport. CRP reasoning is enabled by default. |
+| LM Studio with Qwen/Llama | `http://127.0.0.1:1234` | `openai-tools` | Set `thinking_effort = "none"`; use `no_think = true` for Qwen3-class models. |
 | Ollama | `http://127.0.0.1:11434` | `openai-tools` | Pull a tool-capable model such as `qwen2.5-coder:7b-instruct`. |
 
 Example Ollama flow:
@@ -148,6 +150,7 @@ endpoint = "http://127.0.0.1:11434"
 model = "qwen2.5-coder:7b-instruct"
 format = "openai-tools"
 thinking_effort = "none"
+no_think = false
 ```
 
 ## TUI Workflow
@@ -228,6 +231,8 @@ api_key_env = ""
 max_tokens = 4096
 temperature = 0.2
 thinking_effort = "medium"    # none, low, medium, high
+no_think = false              # prepends no_think_prefix to system prompts when true
+no_think_prefix = "/no_think" # set to "<no_think>" for servers/templates that expect it
 stream = true
 stop = ["<|return|>", "<|call|>"]
 request_timeout_secs = 600
@@ -237,7 +242,12 @@ context_window = 8192
 workspace = "/home/you/project"
 allow_shell = false
 require_edit_approval = true
+reasoning_protocol = "crp"    # crp or plain
+crp_retry_budget = 3
+transport_retry_budget = 1
+empty_response_retry_budget = 1
 max_tool_turns = 16
+max_model_rounds = 64
 auto_context_compression = true
 context_compression_threshold = 80
 context_compression_keep_recent = 18
@@ -249,16 +259,24 @@ developer_prompt = "Use concise reasoning, ask before destructive actions, and p
 When `api_key_env` is set, Cinto reads the secret from that environment variable
 and sends it as a bearer token. The TUI stores the variable name, not the secret.
 
-## Supported Tool Formats
+## Supported Tool Formats And Reasoning
 
 | Format | Tool-calling shape | Best fit |
 | --- | --- | --- |
 | `harmony` | Tool calls embedded in Harmony-style assistant text | `gpt-oss-20b`, `gpt-oss-120b`, and Harmony-compatible servers |
 | `openai-tools` | Native OpenAI-compatible `tools` and `tool_calls` fields | Qwen, Llama, Ollama, LM Studio, and other OpenAI-compatible chat servers |
 
+`harness.reasoning_protocol = "crp"` is enabled by default and works with both
+tool formats. It asks the model to return final answers as CRP slot traces while
+leaving tool invocation to the selected transport.
+
 If the model keeps requesting tools without answering, raise `max_tool_turns` or
-ask for a narrower step. If the model returns neither text nor a tool call,
-Cinto shows an `Empty Model Response` note with the active model and format.
+ask for a narrower step. `max_model_rounds`, `crp_retry_budget`,
+`transport_retry_budget`, and `empty_response_retry_budget` are tracked
+separately so protocol repairs and transient request failures do not consume
+tool-call budget. If the model returns neither text nor a tool call after the
+empty-response retry budget is exhausted, Cinto shows an `Empty Model Response`
+note with the active model and format.
 
 ## Development
 

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -21,6 +21,8 @@ use tokio::{
 
 use crate::{
     config::Config,
+    kernel::worker::{WorkerEvent, WorkerLoop},
+    model::ModelClient,
     session::{AgentSession, Channel, Role, TurnEvent},
     theme::{StatusKind, Theme},
     workspace,
@@ -36,9 +38,11 @@ mod transcript;
 
 use self::{
     layout::app_areas,
-    settings::{SETTINGS, SettingField, next_format, next_thinking_effort},
-    setup::SetupPreset,
-    transcript::TranscriptItem,
+    settings::{
+        SETTINGS, SettingField, next_format, next_reasoning_protocol, next_thinking_effort,
+    },
+    setup::preset_index_from_endpoint,
+    transcript::{TranscriptItem, sanitize_stream_body},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +53,8 @@ enum View {
 }
 
 type TurnTask = JoinHandle<(AgentSession, Result<()>)>;
+type KernelTask = JoinHandle<Result<String>>;
+const TURN_INTERRUPTED: &str = "turn interrupted";
 
 struct PendingToolApproval {
     recipient: String,
@@ -61,8 +67,10 @@ pub(crate) enum StreamPhase {
     Idle,
     WarmingUp,
     Thinking,
+    CrpSlot(String),
     CallingTool(String),
     Responding,
+    KernelStage(String),
 }
 
 pub struct App {
@@ -80,13 +88,17 @@ pub struct App {
     setting_editor: Option<String>,
     setup_selected: usize,
     setup_editor: Option<String>,
-    setup_preset: SetupPreset,
+    setup_preset: usize,
     sidebar_visible: bool,
     header_expanded: bool,
     chat_scroll: u16,
     follow_tail: bool,
     spinner_tick: u64,
+    kernel_mode: bool,
+    kernel_task: Option<KernelTask>,
+    kernel_rx: Option<UnboundedReceiver<WorkerEvent>>,
     send_task: Option<TurnTask>,
+    cancel_tx: Option<oneshot::Sender<()>>,
     stream_rx: Option<UnboundedReceiver<TurnEvent>>,
     stream_item_index: Option<usize>,
     pending_tool_approval: Option<PendingToolApproval>,
@@ -110,7 +122,7 @@ impl App {
         let history_len = session.history_len();
         let todo_details = session.todo_details();
         let todo_status_line = session.todo_status_line();
-        let setup_preset = SetupPreset::from_endpoint(&config.model.endpoint);
+        let setup_preset = preset_index_from_endpoint(&config.model.endpoint);
 
         Self {
             session: Some(session),
@@ -136,7 +148,11 @@ impl App {
             chat_scroll: 0,
             follow_tail: true,
             spinner_tick: 0,
+            kernel_mode: false,
+            kernel_task: None,
+            kernel_rx: None,
             send_task: None,
+            cancel_tx: None,
             stream_rx: None,
             stream_item_index: None,
             pending_tool_approval: None,
@@ -210,6 +226,10 @@ impl App {
                 }
 
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if self.is_busy() {
+                        self.interrupt_turn();
+                        continue;
+                    }
                     return Ok(());
                 }
                 if self.handle_approval_key(key.code) {
@@ -221,6 +241,10 @@ impl App {
                 }
                 if key.code == KeyCode::F(4) {
                     self.header_expanded = !self.header_expanded;
+                    continue;
+                }
+                if key.code == KeyCode::F(5) {
+                    self.toggle_kernel_mode();
                     continue;
                 }
 
@@ -252,8 +276,9 @@ impl App {
             }
             KeyCode::Up => self.scroll_up(1),
             KeyCode::Down => self.scroll_down(1),
+            KeyCode::Esc if self.is_busy() => self.interrupt_turn(),
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter if self.is_busy() => {
-                self.status = "waiting for current turn".to_string();
+                self.status = "waiting for current turn; Esc interrupts".to_string();
                 self.status_kind = StatusKind::Working;
             }
             KeyCode::Char(ch) => {
@@ -284,6 +309,10 @@ impl App {
 
         match input.as_str() {
             "/quit" | "/exit" => return Ok(true),
+            "/kernel" => {
+                self.toggle_kernel_mode();
+                return Ok(false);
+            }
             "/settings" => {
                 self.view = View::Settings;
                 self.clear_path_suggestions();
@@ -311,7 +340,7 @@ impl App {
             "/prompt" => {
                 if let Some(session) = &self.session {
                     self.transcript.push(TranscriptItem::system(
-                        "Harmony Prompt",
+                        "Model Prompt",
                         session.render_prompt(),
                     ));
                     self.follow_tail = true;
@@ -353,6 +382,10 @@ impl App {
             }
             "/checkpoints" => {
                 self.show_checkpoints();
+                return Ok(false);
+            }
+            "/context" => {
+                self.detect_context_window().await?;
                 return Ok(false);
             }
             _ => {}
@@ -446,11 +479,16 @@ impl App {
     }
 
     fn start_async_turn(&mut self, input: String) -> Result<()> {
+        if self.kernel_mode {
+            return self.start_kernel_turn(input);
+        }
+
         let mut session = self
             .session
             .take()
             .context("session is unavailable while a turn is already running")?;
         let (event_tx, event_rx) = unbounded_channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
 
         self.transcript.push(TranscriptItem::user(input.clone()));
         self.follow_tail = true;
@@ -462,17 +500,174 @@ impl App {
         self.turn_first_token_at = None;
         self.turn_token_chars = 0;
         self.stream_rx = Some(event_rx);
+        self.cancel_tx = Some(cancel_tx);
         self.stream_item_index = None;
 
         self.send_task = Some(tokio::spawn(async move {
-            let result = session.send_user_message_streaming(input, event_tx).await;
+            let result = tokio::select! {
+                result = session.send_user_message_streaming(input, event_tx) => result,
+                _ = cancel_rx => {
+                    session.discard_trailing_user_message();
+                    Err(anyhow!(TURN_INTERRUPTED))
+                }
+            };
             (session, result)
         }));
 
         Ok(())
     }
 
+    fn start_kernel_turn(&mut self, input: String) -> Result<()> {
+        if self.kernel_task.is_some() {
+            self.status = "kernel turn already running".to_string();
+            self.status_kind = StatusKind::Warn;
+            return Ok(());
+        }
+
+        let (event_tx, event_rx) = unbounded_channel::<WorkerEvent>();
+        let workspace = self.config.harness.workspace.clone();
+        let config = self.config.clone();
+
+        self.transcript.push(TranscriptItem::user(input.clone()));
+        self.follow_tail = true;
+        self.status = "kernel: starting".to_string();
+        self.status_kind = StatusKind::Working;
+        self.busy_since = Some(Instant::now());
+        self.last_turn_elapsed = None;
+        self.stream_phase = StreamPhase::WarmingUp;
+        self.kernel_rx = Some(event_rx);
+
+        self.kernel_task = Some(tokio::spawn(async move {
+            WorkerLoop::new(&workspace, config, input, event_tx)
+                .run_bugfix()
+                .await
+        }));
+
+        Ok(())
+    }
+
+    fn apply_kernel_event(&mut self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::StageStarted { stage } => {
+                self.stream_phase = StreamPhase::KernelStage(stage.clone());
+                self.status = format!("kernel: {stage}");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::ContextPackReady { stage, chars_used, budget } => {
+                self.status = format!("kernel: {stage} [{chars_used}/{budget} chars]");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::StageCompleted { stage, crp_valid } => {
+                let marker = if crp_valid { "✓" } else { "~ (plain text)" };
+                self.status = format!("kernel: {stage} {marker}");
+                self.status_kind = StatusKind::Working;
+            }
+            WorkerEvent::StageRetry { stage, attempt, reason } => {
+                self.transcript.push(TranscriptItem::system(
+                    format!("Kernel retry — {stage} (attempt {attempt})"),
+                    reason,
+                ));
+            }
+            WorkerEvent::StageFailed { stage, error } => {
+                self.transcript.push(TranscriptItem::error(
+                    format!("Kernel stage {stage} failed: {error}"),
+                ));
+            }
+            WorkerEvent::WorkflowComplete { final_response } => {
+                let mut item = TranscriptItem::assistant_stream();
+                item.body = final_response;
+                self.transcript.push(item);
+                self.follow_tail = true;
+            }
+            WorkerEvent::WorkflowFailed { error } => {
+                self.transcript.push(TranscriptItem::error(
+                    format!("Kernel workflow failed: {error}"),
+                ));
+            }
+            WorkerEvent::PatchApprovalRequested { path, preview, response_tx } => {
+                self.pending_tool_approval = Some(PendingToolApproval {
+                    recipient: path.clone(),
+                    summary: format!("write {path}"),
+                    response_tx,
+                });
+                self.transcript.push(TranscriptItem::system(
+                    "Patch Approval",
+                    format!("{preview}\nPress y to apply or n to skip."),
+                ));
+                self.status = "patch approval needed".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            WorkerEvent::PatchApplied { files_changed } => {
+                self.transcript.push(TranscriptItem::system(
+                    "Patch Applied",
+                    files_changed.join("\n"),
+                ));
+                self.follow_tail = true;
+            }
+            // Trace events carry raw prompt/response pairs for dataset generation.
+            // The TUI has no use for them — only the batch runner consumes them.
+            WorkerEvent::StageSkipped { stage, reason } => {
+                self.transcript.push(TranscriptItem::system(
+                    format!("Kernel skipped — {stage}"),
+                    format!("{reason}\nContinuing with search-based context."),
+                ));
+            }
+            WorkerEvent::StageTrace { .. } => {}
+        }
+    }
+
+    fn toggle_kernel_mode(&mut self) {
+        if self.is_busy() {
+            self.status = "cannot switch mode while a turn is running".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        }
+        self.kernel_mode = !self.kernel_mode;
+        let mode = if self.kernel_mode { "kernel" } else { "core" };
+        self.append_system(
+            "Mode",
+            format!("Switched to {mode} mode. {}", if self.kernel_mode {
+                "Tasks run as a staged pipeline. F5 or /kernel to switch back."
+            } else {
+                "Tasks run as a conversational agent. F5 or /kernel to switch back."
+            }),
+        );
+        self.status = format!("mode: {mode}");
+        self.status_kind = StatusKind::Idle;
+    }
+
     async fn finish_completed_turn(&mut self) -> Result<()> {
+        // ── Kernel task ──────────────────────────────────────────────────────
+        if let Some(task) = &self.kernel_task {
+            if task.is_finished() {
+                let task = self.kernel_task.take().expect("checked");
+                match task.await {
+                    Ok(Ok(_)) => {
+                        self.status = "kernel: done".to_string();
+                        self.status_kind = StatusKind::Ok;
+                    }
+                    Ok(Err(e)) => {
+                        self.transcript.push(TranscriptItem::error(format!("{e:#}")));
+                        self.status = "kernel: failed".to_string();
+                        self.status_kind = StatusKind::Error;
+                    }
+                    Err(e) => {
+                        self.transcript.push(TranscriptItem::error(format!("kernel task: {e}")));
+                        self.status = "kernel: task error".to_string();
+                        self.status_kind = StatusKind::Error;
+                    }
+                }
+                self.last_turn_elapsed = self.busy_since.map(|s| s.elapsed());
+                self.last_reply_at = Some(Instant::now());
+                self.busy_since = None;
+                self.stream_phase = StreamPhase::Idle;
+                self.kernel_rx = None;
+                self.follow_tail = true;
+            }
+        }
+
+        // ── Core task ────────────────────────────────────────────────────────
         let Some(task) = &self.send_task else {
             return Ok(());
         };
@@ -488,6 +683,14 @@ impl App {
                     Ok(()) => {
                         self.status = "ready".to_string();
                         self.status_kind = StatusKind::Ok;
+                    }
+                    Err(error) if error.to_string() == TURN_INTERRUPTED => {
+                        self.transcript.push(TranscriptItem::system(
+                            "Interrupted",
+                            "Stopped the in-flight model turn.",
+                        ));
+                        self.status = "interrupted".to_string();
+                        self.status_kind = StatusKind::Warn;
                     }
                     Err(error) => {
                         self.transcript
@@ -510,6 +713,7 @@ impl App {
         self.last_turn_elapsed = self.busy_since.map(|started| started.elapsed());
         self.last_reply_at = Some(Instant::now());
         self.busy_since = None;
+        self.cancel_tx = None;
         self.stream_phase = StreamPhase::Idle;
         self.turn_first_token_at = None;
         self.turn_token_chars = 0;
@@ -521,15 +725,21 @@ impl App {
     }
 
     fn drain_stream_events(&mut self) {
-        let Some(mut rx) = self.stream_rx.take() else {
-            return;
-        };
-
-        while let Ok(event) = rx.try_recv() {
-            self.apply_turn_event(event);
+        // Core events
+        if let Some(mut rx) = self.stream_rx.take() {
+            while let Ok(event) = rx.try_recv() {
+                self.apply_turn_event(event);
+            }
+            self.stream_rx = Some(rx);
         }
 
-        self.stream_rx = Some(rx);
+        // Kernel events
+        if let Some(mut rx) = self.kernel_rx.take() {
+            while let Ok(event) = rx.try_recv() {
+                self.apply_kernel_event(event);
+            }
+            self.kernel_rx = Some(rx);
+        }
     }
 
     fn apply_turn_event(&mut self, event: TurnEvent) {
@@ -603,6 +813,73 @@ impl App {
                     ),
                 ));
                 self.status = "empty model response".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            TurnEvent::ModelRetryRequested {
+                attempt,
+                budget,
+                reason,
+            } => {
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
+                }
+                self.transcript.push(TranscriptItem::system(
+                    format!("Model Retry {attempt}/{budget}"),
+                    reason,
+                ));
+                self.status = "model retry".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            TurnEvent::CrpRetryRequested {
+                attempt,
+                budget,
+                invalid_slots,
+                parse_error,
+            } => {
+                if let Some(index) = self.stream_item_index.take()
+                    && index < self.transcript.len()
+                {
+                    self.transcript.remove(index);
+                }
+                let detail = if let Some(error) = parse_error {
+                    format!("CRP parse failed: {error}. Asking the model to re-emit a valid trace.")
+                } else if invalid_slots.is_empty() {
+                    "CRP validation failed. Asking the model to retry.".to_string()
+                } else {
+                    format!(
+                        "Invalid slots: {}. Asking the model to retry.",
+                        invalid_slots.join(", ")
+                    )
+                };
+                self.transcript.push(TranscriptItem::system(
+                    format!("CRP Retry {attempt}/{budget}"),
+                    detail,
+                ));
+                self.status = "crp retry".to_string();
+                self.status_kind = StatusKind::Warn;
+                self.follow_tail = true;
+            }
+            TurnEvent::CrpRetryExhausted {
+                budget,
+                invalid_slots,
+            } => {
+                let detail = if invalid_slots.is_empty() {
+                    format!(
+                        "CRP retry budget ({budget}) exhausted. Surfacing the best-effort response with warnings."
+                    )
+                } else {
+                    format!(
+                        "CRP retry budget ({budget}) exhausted with invalid slots: {}. Surfacing the best-effort response.",
+                        invalid_slots.join(", ")
+                    )
+                };
+                self.transcript
+                    .push(TranscriptItem::system("CRP Retry Exhausted", detail));
+                self.status = "crp retry exhausted".to_string();
                 self.status_kind = StatusKind::Warn;
                 self.follow_tail = true;
             }
@@ -905,6 +1182,90 @@ impl App {
         self.follow_tail = true;
     }
 
+    async fn detect_context_window(&mut self) -> Result<()> {
+        if self.is_busy() {
+            self.status = "wait for current turn before detecting context".to_string();
+            self.status_kind = StatusKind::Warn;
+            return Ok(());
+        }
+
+        let old_window = self.config.model.context_window;
+        self.transcript.push(TranscriptItem::system(
+            "Context Detection",
+            "Checking the model server for the served context window...",
+        ));
+        self.status = "detecting context".to_string();
+        self.status_kind = StatusKind::Working;
+        self.follow_tail = true;
+
+        let client = ModelClient::new(self.config.model.clone());
+        match tokio::time::timeout(Duration::from_secs(15), client.detect_context_window()).await {
+            Ok(Ok(Some(detected_window))) if detected_window > 0 => {
+                let mut config = self.config.clone();
+                config.model.context_window = detected_window;
+                self.apply_config(config);
+                let path = self.config.save(self.config_path.clone())?;
+                self.config_path = Some(path.clone());
+
+                let detail = if detected_window == old_window {
+                    format!("Confirmed {detected_window} tokens.")
+                } else {
+                    format!(
+                        "Updated context window from {old_window} to {detected_window} tokens.\nSaved config to {}.",
+                        path.display()
+                    )
+                };
+                self.transcript
+                    .push(TranscriptItem::system("Context Detection", detail));
+                self.status = "context updated".to_string();
+                self.status_kind = StatusKind::Ok;
+            }
+            Ok(Ok(_)) => {
+                self.transcript.push(TranscriptItem::system(
+                    "Context Detection",
+                    "The server did not expose a context window for this model.",
+                ));
+                self.status = "context unavailable".to_string();
+                self.status_kind = StatusKind::Warn;
+            }
+            Ok(Err(error)) => {
+                self.transcript.push(TranscriptItem::error(format!(
+                    "Context detection failed: {error:#}"
+                )));
+                self.status = "context detection failed".to_string();
+                self.status_kind = StatusKind::Error;
+            }
+            Err(_) => {
+                self.transcript.push(TranscriptItem::system(
+                    "Context Detection",
+                    "Timed out while checking the model server.",
+                ));
+                self.status = "context detection timed out".to_string();
+                self.status_kind = StatusKind::Warn;
+            }
+        }
+
+        self.follow_tail = true;
+        Ok(())
+    }
+
+    fn interrupt_turn(&mut self) {
+        let Some(cancel_tx) = self.cancel_tx.take() else {
+            self.status = "interrupt already requested".to_string();
+            self.status_kind = StatusKind::Warn;
+            return;
+        };
+
+        let _ = cancel_tx.send(());
+        self.transcript.push(TranscriptItem::system(
+            "Interrupt Requested",
+            "Stopping the in-flight model turn...",
+        ));
+        self.status = "interrupting".to_string();
+        self.status_kind = StatusKind::Warn;
+        self.follow_tail = true;
+    }
+
     fn refresh_session_stats(&mut self) {
         if let Some(session) = &self.session {
             self.config = session.config().clone();
@@ -942,6 +1303,7 @@ impl App {
                 | SettingField::AutoContextCompression
                 | SettingField::WorkspaceInstructions
                 | SettingField::ThinkingEffort
+                | SettingField::ReasoningProtocol
                 | SettingField::Format
         ) {
             return self.toggle_setting();
@@ -979,6 +1341,10 @@ impl App {
             }
             SettingField::ThinkingEffort => {
                 config.model.thinking_effort = next_thinking_effort(&config.model.thinking_effort);
+            }
+            SettingField::ReasoningProtocol => {
+                config.harness.reasoning_protocol =
+                    next_reasoning_protocol(&config.harness.reasoning_protocol);
             }
             SettingField::Format => {
                 config.model.format = next_format(&config.model.format);
@@ -1041,7 +1407,7 @@ impl App {
     }
 
     fn is_busy(&self) -> bool {
-        self.send_task.is_some()
+        self.send_task.is_some() || self.kernel_task.is_some()
     }
 }
 
@@ -1070,12 +1436,19 @@ fn current_path_prefix(input: &str) -> Option<((usize, usize), String)> {
 }
 
 fn derive_stream_phase(body: &str) -> StreamPhase {
+    let visible = visible_stream_body(body);
+    if visible.trim_start().starts_with('<')
+        && let Some(slot) = crate::crp::active_slot(&visible)
+    {
+        return StreamPhase::CrpSlot(slot);
+    }
+
     const MARKER: &str = "<|channel|>";
     let Some(idx) = body.rfind(MARKER) else {
         return if body.is_empty() {
             StreamPhase::WarmingUp
         } else {
-            StreamPhase::Thinking
+            StreamPhase::Responding
         };
     };
     let after = &body[idx + MARKER.len()..];
@@ -1106,6 +1479,15 @@ fn derive_stream_phase(body: &str) -> StreamPhase {
     }
 }
 
+fn visible_stream_body(body: &str) -> String {
+    let sanitized = sanitize_stream_body(body);
+    if sanitized.is_empty() && !body.contains("<|") {
+        body.to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn is_path_like(token: &str) -> bool {
     token.len() >= 2
         && !token.starts_with('/')
@@ -1114,4 +1496,33 @@ fn is_path_like(token: &str) -> bool {
             || token
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_crp_slot_from_plain_stream() {
+        assert_eq!(
+            derive_stream_phase("<PROPOSED_APPROACH>\n- Add CRP UI."),
+            StreamPhase::CrpSlot("PROPOSED_APPROACH".to_string())
+        );
+    }
+
+    #[test]
+    fn derives_crp_slot_from_harmony_final_stream() {
+        assert_eq!(
+            derive_stream_phase("<|channel|>final<|message|><FILE_EDITS>\n@@ src/main.rs prepend"),
+            StreamPhase::CrpSlot("FILE_EDITS".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_uppercase_markup_when_stream_is_not_crp() {
+        assert_eq!(
+            derive_stream_phase("Use <TOKEN> as placeholder."),
+            StreamPhase::Responding
+        );
+    }
 }

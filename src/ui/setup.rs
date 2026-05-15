@@ -9,41 +9,44 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use super::{App, StatusKind, View, settings::next_format};
+use crate::{
+    config::{self, PRESETS},
+    model::ModelClient,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SetupPreset {
-    LmStudio,
-    Ollama,
-    Custom,
+use super::{
+    App, StatusKind, View,
+    settings::{next_format, next_reasoning_protocol},
+};
+
+/// Index into `config::PRESETS`, or `PRESETS.len()` for "Custom".
+pub(super) fn preset_index_from_endpoint(endpoint: &str) -> usize {
+    for (index, preset) in PRESETS.iter().enumerate() {
+        if let Ok(config) = preset.to_config() {
+            if endpoint.contains(&strip_scheme(&config.model.endpoint)) {
+                return index;
+            }
+        }
+    }
+    PRESETS.len() // Custom
 }
 
-impl SetupPreset {
-    pub(super) fn from_endpoint(endpoint: &str) -> Self {
-        if endpoint.contains("127.0.0.1:1234") || endpoint.contains("localhost:1234") {
-            Self::LmStudio
-        } else if endpoint.contains("127.0.0.1:11434") || endpoint.contains("localhost:11434") {
-            Self::Ollama
-        } else {
-            Self::Custom
-        }
-    }
+fn strip_scheme(url: &str) -> String {
+    url.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string()
+}
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::LmStudio => "LM Studio",
-            Self::Ollama => "Ollama",
-            Self::Custom => "Custom",
-        }
+fn preset_label(index: usize) -> String {
+    if index < PRESETS.len() {
+        format!("{} — {}", PRESETS[index].label, PRESETS[index].description)
+    } else {
+        "Custom".to_string()
     }
+}
 
-    fn next(self) -> Self {
-        match self {
-            Self::LmStudio => Self::Ollama,
-            Self::Ollama => Self::Custom,
-            Self::Custom => Self::LmStudio,
-        }
-    }
+fn next_preset(index: usize) -> usize {
+    (index + 1) % (PRESETS.len() + 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +55,7 @@ enum SetupField {
     Endpoint,
     Model,
     Format,
+    ReasoningProtocol,
     Workspace,
     EditApproval,
     Shell,
@@ -59,11 +63,12 @@ enum SetupField {
     SaveStart,
 }
 
-const SETUP_FIELDS: [SetupField; 9] = [
+const SETUP_FIELDS: [SetupField; 10] = [
     SetupField::Preset,
     SetupField::Endpoint,
     SetupField::Model,
     SetupField::Format,
+    SetupField::ReasoningProtocol,
     SetupField::Workspace,
     SetupField::EditApproval,
     SetupField::Shell,
@@ -79,9 +84,18 @@ impl App {
 
         match code {
             KeyCode::Esc | KeyCode::Tab | KeyCode::F(2) => {
+                match self.config.save(self.config_path.clone()) {
+                    Ok(path) => {
+                        self.config_path = Some(path);
+                        self.status = "setup saved".to_string();
+                        self.status_kind = StatusKind::Ok;
+                    }
+                    Err(e) => {
+                        self.status = format!("setup: could not save — {e}");
+                        self.status_kind = StatusKind::Error;
+                    }
+                }
                 self.view = View::Chat;
-                self.status = "setup skipped".to_string();
-                self.status_kind = StatusKind::Warn;
             }
             KeyCode::Up => {
                 self.setup_selected = self
@@ -134,7 +148,7 @@ impl App {
     fn activate_setup_field(&mut self) -> Result<()> {
         match SETUP_FIELDS[self.setup_selected] {
             SetupField::Preset => {
-                self.setup_preset = self.setup_preset.next();
+                self.setup_preset = next_preset(self.setup_preset);
                 self.apply_setup_preset();
             }
             SetupField::Endpoint | SetupField::Model | SetupField::Workspace => {
@@ -143,6 +157,12 @@ impl App {
             SetupField::Format => {
                 let mut config = self.config.clone();
                 config.model.format = next_format(&config.model.format);
+                self.apply_config(config);
+            }
+            SetupField::ReasoningProtocol => {
+                let mut config = self.config.clone();
+                config.harness.reasoning_protocol =
+                    next_reasoning_protocol(&config.harness.reasoning_protocol);
                 self.apply_config(config);
             }
             SetupField::EditApproval => {
@@ -174,7 +194,7 @@ impl App {
         match field {
             SetupField::Endpoint => {
                 config.model.endpoint = non_empty(value, "endpoint")?;
-                self.setup_preset = SetupPreset::from_endpoint(&config.model.endpoint);
+                self.setup_preset = preset_index_from_endpoint(&config.model.endpoint);
             }
             SetupField::Model => config.model.model = non_empty(value, "model")?,
             SetupField::Workspace => {
@@ -188,27 +208,70 @@ impl App {
     }
 
     fn apply_setup_preset(&mut self) {
-        let mut config = self.config.clone();
-        match self.setup_preset {
-            SetupPreset::LmStudio => {
-                config.model.endpoint = "http://127.0.0.1:1234".to_string();
-                config.model.model = "openai/gpt-oss-20b".to_string();
-                config.model.format = "harmony".to_string();
-                config.model.thinking_effort = "medium".to_string();
-            }
-            SetupPreset::Ollama => {
-                config.model.endpoint = "http://127.0.0.1:11434".to_string();
-                config.model.model = "qwen2.5-coder:7b-instruct".to_string();
-                config.model.format = "openai-tools".to_string();
-                config.model.thinking_effort = "none".to_string();
-                config.model.stop.clear();
-            }
-            SetupPreset::Custom => {}
+        if self.setup_preset >= PRESETS.len() {
+            // Custom — don't change anything
+            return;
         }
+
+        let preset = &PRESETS[self.setup_preset];
+        let Ok(preset_config) = preset.to_config() else {
+            return;
+        };
+
+        let mut config = self.config.clone();
+        // Apply model settings from preset, keep workspace and prompts
+        config.model.endpoint = preset_config.model.endpoint;
+        config.model.model = preset_config.model.model;
+        config.model.format = preset_config.model.format;
+        config.model.max_tokens = preset_config.model.max_tokens;
+        config.model.temperature = preset_config.model.temperature;
+        config.model.thinking_effort = preset_config.model.thinking_effort;
+        config.model.stream = preset_config.model.stream;
+        config.model.stop = preset_config.model.stop;
+        config.model.request_timeout_secs = preset_config.model.request_timeout_secs;
+        config.model.context_window = preset_config.model.context_window;
+        // Apply harness settings from preset, keep workspace and prompts
+        config.harness.reasoning_protocol = preset_config.harness.reasoning_protocol;
+        config.harness.crp_retry_budget = preset_config.harness.crp_retry_budget;
+        config.harness.transport_retry_budget = preset_config.harness.transport_retry_budget;
+        config.harness.empty_response_retry_budget =
+            preset_config.harness.empty_response_retry_budget;
+        config.harness.max_tool_turns = preset_config.harness.max_tool_turns;
+        config.harness.max_model_rounds = preset_config.harness.max_model_rounds;
+        config.harness.auto_context_compression = preset_config.harness.auto_context_compression;
+        config.harness.require_edit_approval = preset_config.harness.require_edit_approval;
+        config.harness.allow_shell = preset_config.harness.allow_shell;
+
         self.apply_config(config);
     }
 
     fn finish_setup(&mut self) -> Result<()> {
+        let old_window = self.config.model.context_window;
+        let detected_ctx = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let client = ModelClient::new(self.config.model.clone());
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    client.detect_context_window(),
+                )
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .flatten()
+            })
+        });
+
+        if let Some(detected_window) = detected_ctx
+            && detected_window > 0
+            && detected_window != old_window
+        {
+            self.config.model.context_window = detected_window;
+            self.append_system(
+                "Context Detection",
+                format!("Updated context window from {old_window} to {detected_window} tokens."),
+            );
+        }
+
         let path = self
             .config
             .save(self.config_path.clone())
@@ -229,10 +292,11 @@ impl App {
 
     fn setup_value(&self, field: SetupField) -> String {
         match field {
-            SetupField::Preset => self.setup_preset.label().to_string(),
+            SetupField::Preset => preset_label(self.setup_preset),
             SetupField::Endpoint => self.config.model.endpoint.clone(),
             SetupField::Model => self.config.model.model.clone(),
             SetupField::Format => self.config.model.format.clone(),
+            SetupField::ReasoningProtocol => self.config.harness.reasoning_protocol.clone(),
             SetupField::Workspace => self.config.harness.workspace.display().to_string(),
             SetupField::EditApproval => bool_label(self.config.harness.require_edit_approval),
             SetupField::Shell => bool_label(self.config.harness.allow_shell),
@@ -287,7 +351,7 @@ impl App {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled("First run setup", self.theme.brand()),
-            Span::styled("  choose sane defaults, then chat", self.theme.dim_style()),
+            Span::styled("  choose a preset, then chat", self.theme.dim_style()),
         ]));
 
         if inner.height >= 13 {
@@ -304,6 +368,21 @@ impl App {
                 Span::styled("model     ", self.theme.dim_style()),
                 Span::raw(self.config.model.model.clone()),
             ]));
+
+            if inner.height >= 16 {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Presets: ", self.theme.dim_style()),
+                    Span::raw(
+                        config::PRESETS
+                            .iter()
+                            .map(|p| p.label)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    Span::styled(", Custom", self.theme.dim_style()),
+                ]));
+            }
         }
 
         let hero = Paragraph::new(lines)
@@ -399,6 +478,7 @@ impl SetupField {
             Self::Endpoint => "endpoint",
             Self::Model => "model",
             Self::Format => "format",
+            Self::ReasoningProtocol => "reasoning",
             Self::Workspace => "workspace",
             Self::EditApproval => "edit approval",
             Self::Shell => "shell tools",

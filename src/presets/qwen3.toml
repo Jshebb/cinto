@@ -1,0 +1,33 @@
+# Cinto preset: Qwen3 / Qwen3.5 local
+# OpenAI-compatible chat template with thinking disabled in-prompt.
+
+[model]
+endpoint = "http://127.0.0.1:1234"
+model = "qwen/qwen3.5-9b"
+format = "openai-tools"
+max_tokens = 2048
+temperature = 0.1
+thinking_effort = "none"
+no_think = true
+no_think_prefix = "/no_think"
+stream = true
+stop = []
+request_timeout_secs = 600
+context_window = 32768
+
+[harness]
+workspace = "."
+allow_shell = false
+require_edit_approval = true
+reasoning_protocol = "crp"
+crp_retry_budget = 2
+transport_retry_budget = 1
+empty_response_retry_budget = 1
+max_tool_turns = 16
+max_model_rounds = 32
+auto_context_compression = true
+context_compression_threshold = 70
+context_compression_keep_recent = 8
+load_workspace_instructions = true
+system_prompt = "You are Cinto, a local coding agent. You help the user understand and modify the current workspace."
+developer_prompt = "Be concise. Prefer small verifiable edits. Ask before destructive actions."

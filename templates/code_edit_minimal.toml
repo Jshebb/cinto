@@ -1,0 +1,11 @@
+name = "code_edit_minimal"
+description = "Quick code edit with minimal reasoning overhead."
+
+[slots.TASK_INTERPRETATION]
+required = true
+
+[slots.FILE_EDITS]
+required = false
+
+[slots.FINAL_RESPONSE]
+required = true

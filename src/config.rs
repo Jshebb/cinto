@@ -1,7 +1,77 @@
-use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Config presets — embedded TOML profiles for common server setups
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ConfigPreset {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    toml: &'static str,
+}
+
+impl ConfigPreset {
+    /// Parse this preset's TOML into a partial `Config`, patching in runtime
+    /// workspace and prompt strings from the global default.
+    pub fn to_config(&self) -> Result<Config> {
+        let mut config: Config = toml::from_str(self.toml)
+            .with_context(|| format!("failed to parse built-in preset `{}`", self.name))?;
+        config.normalize();
+        Ok(config)
+    }
+}
+
+pub const PRESETS: &[ConfigPreset] = &[
+    ConfigPreset {
+        name: "lm-studio",
+        label: "LM Studio",
+        description: "Local LM Studio server with Harmony/gpt-oss defaults",
+        toml: include_str!("presets/lm_studio.toml"),
+    },
+    ConfigPreset {
+        name: "lm-studio-small",
+        label: "LM Studio (small model)",
+        description: "LM Studio with openai-tools format for sub-4B models (Gemma, Phi, etc.)",
+        toml: include_str!("presets/lm_studio_small.toml"),
+    },
+    ConfigPreset {
+        name: "qwen3",
+        label: "Qwen3 / Qwen3.5",
+        description: "Qwen3-class local models with /no_think enabled",
+        toml: include_str!("presets/qwen3.toml"),
+    },
+    ConfigPreset {
+        name: "ollama",
+        label: "Ollama",
+        description: "Local Ollama server with OpenAI-tools format",
+        toml: include_str!("presets/ollama.toml"),
+    },
+    ConfigPreset {
+        name: "vllm",
+        label: "vLLM / OpenAI-compat",
+        description: "vLLM or any OpenAI-compatible API server",
+        toml: include_str!("presets/vllm.toml"),
+    },
+    ConfigPreset {
+        name: "minimal",
+        label: "Minimal",
+        description: "Bare-bones config without CRP reasoning",
+        toml: include_str!("presets/minimal.toml"),
+    },
+];
+
+pub fn preset_by_name(name: &str) -> Option<&'static ConfigPreset> {
+    PRESETS.iter().find(|p| p.name == name)
+}
+
+pub fn preset_index(name: &str) -> Option<usize> {
+    PRESETS.iter().position(|p| p.name == name)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -21,6 +91,10 @@ pub struct ModelConfig {
     pub temperature: f32,
     #[serde(default = "default_thinking_effort")]
     pub thinking_effort: String,
+    #[serde(default)]
+    pub no_think: bool,
+    #[serde(default = "default_no_think_prefix")]
+    pub no_think_prefix: String,
     #[serde(default = "default_stream")]
     pub stream: bool,
     pub stop: Vec<String>,
@@ -36,8 +110,20 @@ pub struct HarnessConfig {
     pub allow_shell: bool,
     #[serde(default = "default_require_edit_approval")]
     pub require_edit_approval: bool,
+    #[serde(default = "default_reasoning_protocol")]
+    pub reasoning_protocol: String,
+    #[serde(default = "default_crp_retry_budget")]
+    pub crp_retry_budget: u32,
+    #[serde(default = "default_transport_retry_budget")]
+    pub transport_retry_budget: u32,
+    #[serde(default = "default_empty_response_retry_budget")]
+    pub empty_response_retry_budget: u32,
+    #[serde(default = "default_template")]
+    pub default_template: String,
     #[serde(default = "default_max_tool_turns")]
     pub max_tool_turns: u32,
+    #[serde(default = "default_max_model_rounds")]
+    pub max_model_rounds: u32,
     #[serde(default = "default_auto_context_compression")]
     pub auto_context_compression: bool,
     #[serde(default = "default_context_compression_threshold")]
@@ -63,6 +149,8 @@ impl Default for Config {
                 max_tokens: 4096,
                 temperature: 0.2,
                 thinking_effort: default_thinking_effort(),
+                no_think: false,
+                no_think_prefix: default_no_think_prefix(),
                 stream: default_stream(),
                 stop: vec!["<|return|>".to_string(), "<|call|>".to_string()],
                 request_timeout_secs: default_timeout_secs(),
@@ -72,7 +160,13 @@ impl Default for Config {
                 workspace,
                 allow_shell: false,
                 require_edit_approval: default_require_edit_approval(),
+                reasoning_protocol: default_reasoning_protocol(),
+                crp_retry_budget: default_crp_retry_budget(),
+                transport_retry_budget: default_transport_retry_budget(),
+                empty_response_retry_budget: default_empty_response_retry_budget(),
+                default_template: default_template(),
                 max_tool_turns: default_max_tool_turns(),
+                max_model_rounds: default_max_model_rounds(),
                 auto_context_compression: default_auto_context_compression(),
                 context_compression_threshold: default_context_compression_threshold(),
                 context_compression_keep_recent: default_context_compression_keep_recent(),
@@ -96,8 +190,10 @@ impl Config {
 
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&contents)
-            .with_context(|| format!("failed to parse config at {}", path.display()))
+        let mut config: Self = toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        config.normalize();
+        Ok(config)
     }
 
     pub fn save(&self, path: Option<PathBuf>) -> Result<PathBuf> {
@@ -119,6 +215,62 @@ impl Config {
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("cinto").join("config.toml"))
     }
+
+    fn normalize(&mut self) {
+        self.model.format = self.model.format.trim().to_ascii_lowercase();
+        self.harness.reasoning_protocol =
+            self.harness.reasoning_protocol.trim().to_ascii_lowercase();
+
+        if self.model.format == "crp" {
+            self.model.format = "harmony".to_string();
+            self.harness.reasoning_protocol = "crp".to_string();
+        }
+    }
+
+    /// Returns the maximum context window supported by the configured model provider.
+    /// Uses provider-specific defaults: Ollama (16k), LM Studio (32k), vLLM/OpenAI-compat (128k).
+    pub fn provider_max_context_window(&self) -> u32 {
+        let endpoint = self.model.endpoint.to_lowercase();
+
+        // Detect Ollama by default port or path
+        if endpoint.contains(":11434") || endpoint.contains("/api/chat") {
+            return 16_000;
+        }
+
+        // LM Studio typically uses Harmony/gpt-oss with large context support
+        if endpoint.contains(":1234") && (self.model.format == "harmony" || self.model.model.contains("gpt-oss")) {
+            return 200_000;
+        }
+
+        // vLLM or generic OpenAI-compatible server - assume large context support
+        if endpoint.contains(":8000") || endpoint.contains("/v1/chat/completions") {
+            return 128_000;
+        }
+
+        // Default fallback for unknown providers
+        32_768
+    }
+
+    pub fn apply_no_think_prefix(&self, prompt: String) -> String {
+        let Some(prefix) = self.model.no_think_directive() else {
+            return prompt;
+        };
+        format!("{prefix}\n\n{prompt}")
+    }
+}
+
+impl ModelConfig {
+    pub fn no_think_directive(&self) -> Option<&str> {
+        if !self.no_think {
+            return None;
+        }
+        let prefix = self.no_think_prefix.trim();
+        if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        }
+    }
 }
 
 fn default_timeout_secs() -> u64 {
@@ -126,11 +278,23 @@ fn default_timeout_secs() -> u64 {
 }
 
 fn default_context_window() -> u32 {
-    8192
+    32768
 }
 
 fn default_max_tool_turns() -> u32 {
-    16
+    24
+}
+
+fn default_max_model_rounds() -> u32 {
+    64
+}
+
+fn default_transport_retry_budget() -> u32 {
+    1
+}
+
+fn default_empty_response_retry_budget() -> u32 {
+    1
 }
 
 fn default_auto_context_compression() -> bool {
@@ -153,8 +317,24 @@ fn default_require_edit_approval() -> bool {
     true
 }
 
+fn default_reasoning_protocol() -> String {
+    "crp".to_string()
+}
+
+fn default_crp_retry_budget() -> u32 {
+    3
+}
+
+fn default_template() -> String {
+    crate::crp::DEFAULT_TEMPLATE_NAME.to_string()
+}
+
 fn default_thinking_effort() -> String {
     "medium".to_string()
+}
+
+fn default_no_think_prefix() -> String {
+    "/no_think".to_string()
 }
 
 fn default_format() -> String {
@@ -168,6 +348,14 @@ fn default_stream() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_to_harmony_transport_with_crp_reasoning() {
+        let config = Config::default();
+
+        assert_eq!(config.model.format, "harmony");
+        assert_eq!(config.harness.reasoning_protocol, "crp");
+    }
 
     #[test]
     fn saves_and_loads_config() {
@@ -185,5 +373,113 @@ mod tests {
         assert_eq!(loaded.model.api_key_env, config.model.api_key_env);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn normalizes_legacy_crp_format() {
+        let path = std::env::temp_dir().join(format!(
+            "cinto-legacy-crp-format-test-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"
+[model]
+endpoint = "http://127.0.0.1:1234"
+model = "openai/gpt-oss-20b"
+format = "crp"
+max_tokens = 4096
+temperature = 0.2
+stop = []
+
+[harness]
+workspace = "."
+allow_shell = false
+system_prompt = "system"
+developer_prompt = "developer"
+"#,
+        )
+        .expect("write config");
+
+        let loaded = Config::load(Some(path.clone())).expect("load config");
+
+        assert_eq!(loaded.model.format, "harmony");
+        assert_eq!(loaded.harness.reasoning_protocol, "crp");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn all_presets_parse_successfully() {
+        for preset in PRESETS {
+            let config = preset
+                .to_config()
+                .unwrap_or_else(|e| panic!("preset `{}` failed to parse: {e}", preset.name));
+            assert!(
+                !config.model.endpoint.is_empty(),
+                "preset `{}` has empty endpoint",
+                preset.name
+            );
+            assert!(
+                !config.model.model.is_empty(),
+                "preset `{}` has empty model",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn preset_lm_studio_uses_harmony_and_crp() {
+        let preset = preset_by_name("lm-studio").expect("lm-studio preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "harmony");
+        assert_eq!(config.harness.reasoning_protocol, "crp");
+        assert!(config.model.endpoint.contains("1234"));
+    }
+
+    #[test]
+    fn preset_ollama_uses_openai_tools() {
+        let preset = preset_by_name("ollama").expect("ollama preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "openai-tools");
+        assert!(config.model.endpoint.contains("11434"));
+    }
+
+    #[test]
+    fn preset_qwen3_enables_no_think() {
+        let preset = preset_by_name("qwen3").expect("qwen3 preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.model.format, "openai-tools");
+        assert_eq!(config.model.no_think_directive(), Some("/no_think"));
+    }
+
+    #[test]
+    fn preset_minimal_disables_crp() {
+        let preset = preset_by_name("minimal").expect("minimal preset exists");
+        let config = preset.to_config().expect("parse");
+        assert_eq!(config.harness.reasoning_protocol, "plain");
+        assert_eq!(config.harness.crp_retry_budget, 0);
+    }
+
+    #[test]
+    fn default_context_window_is_32k() {
+        let config = Config::default();
+        assert_eq!(config.model.context_window, 32768);
+    }
+
+    #[test]
+    fn default_max_tool_turns_is_24() {
+        let config = Config::default();
+        assert_eq!(config.harness.max_tool_turns, 24);
+    }
+
+    #[test]
+    fn default_retry_and_round_budgets_are_separate() {
+        let config = Config::default();
+
+        assert_eq!(config.harness.max_model_rounds, 64);
+        assert_eq!(config.harness.crp_retry_budget, 3);
+        assert_eq!(config.harness.transport_retry_budget, 1);
+        assert_eq!(config.harness.empty_response_retry_budget, 1);
     }
 }

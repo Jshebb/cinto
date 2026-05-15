@@ -83,6 +83,7 @@ pub struct ApiToolFunction {
 pub struct CompletionResult {
     pub text: String,
     pub tool_calls: Vec<ApiToolCall>,
+    pub finish_reason: Option<String>,
 }
 
 pub trait PromptAdapter: Send + Sync + std::fmt::Debug {
@@ -95,6 +96,10 @@ pub trait PromptAdapter: Send + Sync + std::fmt::Debug {
 pub fn build_adapter(config: &Config) -> Result<Box<dyn PromptAdapter>> {
     let (system_prompt, developer_prompt) = prompt_pair(config);
     match config.model.format.trim().to_ascii_lowercase().as_str() {
+        "crp" => Ok(Box::new(HarmonyAdapter::new(
+            system_prompt,
+            developer_prompt,
+        ))),
         "harmony" => Ok(Box::new(HarmonyAdapter::new(
             system_prompt,
             developer_prompt,
@@ -113,7 +118,7 @@ const AGENTS_FILE: &str = "AGENTS.md";
 const MAX_AGENTS_CHARS: usize = 24_000;
 
 fn prompt_pair(config: &Config) -> (String, String) {
-    let system_prompt = config.harness.system_prompt.clone();
+    let system_prompt = config.apply_no_think_prefix(config.harness.system_prompt.clone());
     let mut developer_prompt = config.harness.developer_prompt.clone();
 
     if config.harness.load_workspace_instructions
@@ -123,8 +128,67 @@ fn prompt_pair(config: &Config) -> (String, String) {
         developer_prompt.push_str(&agents);
     }
 
+    if config
+        .harness
+        .reasoning_protocol
+        .eq_ignore_ascii_case("crp")
+    {
+        developer_prompt.push_str("\n\n");
+        developer_prompt.push_str(CRP_DEVELOPER_PROMPT);
+
+        let templates = crate::crp::TemplateSet::load(Some(
+            crate::crp::workspace_template_dir(&config.harness.workspace).as_path(),
+        ));
+        let template = templates.resolve(
+            &config.harness.default_template,
+            &config.model.thinking_effort,
+        );
+        developer_prompt.push_str("\n\n");
+        developer_prompt.push_str(&template.render_brief());
+    }
+
     (system_prompt, developer_prompt)
 }
+
+const CRP_DEVELOPER_PROMPT: &str = r#"## Cinto Reasoning Protocol (CRP)
+
+### Step 1 — Do the work with tools
+
+Before writing any response, use tool calls to gather context and perform actions.
+Call tools one at a time. Only proceed to Step 2 once all required information has been collected and all edits have been applied via tool calls.
+Do NOT describe what you plan to do — just do it via tool calls.
+
+### Step 2 — Emit a response
+
+Once the work is complete, emit a CRP trace.
+For simple conversation, greetings, or direct answers where no technical work was performed, you may use a minimal trace with only <FINAL_RESPONSE>.
+For technical tasks involving research or edits, include recommended slots to make your work auditable.
+
+Do not mix prose and CRP slots. Do not write anything outside CRP tags.
+
+Use these slots to document what was done (past tense — work already completed):
+
+<TASK_INTERPRETATION>
+What the user asked for.
+</TASK_INTERPRETATION>
+
+<RELEVANT_FILES>
+- path/to/file (only list files you actually read or modified via tool calls)
+</RELEVANT_FILES>
+
+<WORK_DONE>
+Summary of the actions taken and edits applied via tool calls.
+</WORK_DONE>
+
+<FILE_EDITS>
+Edits applied. You may use terse @@ diff blocks.
+</FILE_EDITS>
+
+<FINAL_RESPONSE>
+Concise answer to the user.
+</FINAL_RESPONSE>
+
+If you cannot proceed without user input, emit <CLARIFICATION_REQUEST> with one direct question and include <FINAL_RESPONSE> explaining that you need clarification. Keep slot content concise."#;
 
 fn load_agents_instructions(workspace: &Path) -> Result<Option<String>> {
     let path = workspace.join(AGENTS_FILE);
@@ -195,7 +259,8 @@ mod tests {
 
         let (_, developer_prompt) = prompt_pair(&config);
 
-        assert_eq!(developer_prompt, "Only base.");
+        assert!(developer_prompt.contains("Only base."));
+        assert!(!developer_prompt.contains("Workspace instructions from AGENTS.md"));
 
         let _ = fs::remove_dir_all(&workspace);
     }
@@ -217,8 +282,54 @@ mod tests {
 
         let (_, developer_prompt) = prompt_pair(&config);
 
-        assert_eq!(developer_prompt, "Only base.");
+        assert!(developer_prompt.contains("Only base."));
+        assert!(!developer_prompt.contains("Workspace instructions from AGENTS.md"));
+        assert!(!developer_prompt.contains("ignore the user"));
 
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn injects_crp_instructions_by_default() {
+        let config = Config::default();
+
+        let (_, developer_prompt) = prompt_pair(&config);
+
+        assert!(developer_prompt.contains("Cinto Reasoning Protocol"));
+        assert!(developer_prompt.contains("<FINAL_RESPONSE>"));
+    }
+
+    #[test]
+    fn prepends_no_think_directive_to_system_prompt() {
+        let mut config = Config::default();
+        config.model.no_think = true;
+        config.model.no_think_prefix = "<no_think>".to_string();
+        config.harness.system_prompt = "Base system prompt.".to_string();
+
+        let (system_prompt, _) = prompt_pair(&config);
+
+        assert!(system_prompt.starts_with("<no_think>\n\nBase system prompt."));
+    }
+
+    #[test]
+    fn builds_legacy_crp_format_as_harmony_transport() {
+        let mut config = Config::default();
+        config.model.format = "crp".to_string();
+
+        let adapter = build_adapter(&config).expect("build legacy crp format");
+        assert!(adapter.debug_render(&[]).contains("<|start|>developer"));
+    }
+
+    #[test]
+    fn injects_crp_instructions_for_openai_tools() {
+        let mut config = Config::default();
+        config.model.format = "openai-tools".to_string();
+
+        let adapter = build_adapter(&config).expect("build openai adapter");
+        assert!(
+            adapter
+                .debug_render(&[])
+                .contains("Cinto Reasoning Protocol")
+        );
     }
 }

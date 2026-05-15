@@ -1,0 +1,33 @@
+# Cinto preset: LM Studio (small model)
+# Optimized for sub-4B models (Gemma 4 E2B, Phi-3 mini, etc.) via LM Studio.
+# Uses openai-tools format — LM Studio applies the model's native chat template.
+# Harmony format is NOT used here: it is gpt-oss specific and confuses small models.
+
+[model]
+endpoint = "http://127.0.0.1:1234"
+model = "google/gemma-4-e2b"
+format = "openai-tools"
+max_tokens = 1024
+temperature = 0.1
+thinking_effort = "none"
+stream = true
+stop = []
+request_timeout_secs = 300
+context_window = 8192
+
+[harness]
+workspace = "."
+allow_shell = false
+require_edit_approval = true
+reasoning_protocol = "crp"
+crp_retry_budget = 2
+transport_retry_budget = 1
+empty_response_retry_budget = 1
+max_tool_turns = 12
+max_model_rounds = 24
+auto_context_compression = true
+context_compression_threshold = 70
+context_compression_keep_recent = 8
+load_workspace_instructions = true
+system_prompt = "You are Cinto, a local coding agent. You help the user understand and modify the current workspace."
+developer_prompt = "Be concise. Prefer small verifiable edits. Ask before destructive actions."
