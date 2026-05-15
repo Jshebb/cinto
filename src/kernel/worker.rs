@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::context_pack::{ContextHints, ContextPack, ContextPackBuilder};
+use super::memory;
 use super::patch;
 use super::search::{SearchParams, search};
 
@@ -203,24 +204,37 @@ impl WorkerLoop {
             .await
             .unwrap_or_else(|_| ContextPackBuilder::new(&self.workspace).with_index());
 
+        // Load past decisions to give hypothesize stage relevant prior context.
+        let past_decisions = memory::load_recent_decisions(&self.workspace);
+        let hyp_task = if past_decisions.is_empty() {
+            task.clone()
+        } else {
+            format!("{task}\n\n[Past decisions]\n{past_decisions}")
+        };
+
         let hyp_hints = ContextHints {
             files: locate_out.relevant_files.clone(),
             search_terms: interpret_out.search_terms.clone(),
             ..Default::default()
         };
-        let hyp_pack = builder.build(&task, &hyp_hints)?;
+        let hyp_pack = builder.build(&hyp_task, &hyp_hints)?;
         self.emit_pack(&hyp_pack, StageKind::Hypothesize.label());
 
         self.emit(WorkerEvent::StageStarted {
             stage: StageKind::Hypothesize.label().into(),
         });
         let hyp_out = self
-            .run_stage(StageKind::Hypothesize, &task, &hyp_pack)
+            .run_stage(StageKind::Hypothesize, &hyp_task, &hyp_pack)
             .await?;
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Hypothesize.label().into(),
             crp_valid: hyp_out.crp_valid,
         });
+
+        // Save the approach to local memory for future runs.
+        if let Some(ref approach) = hyp_out.approach {
+            let _ = memory::save_decision(&self.workspace, &task, approach);
+        }
 
         // ── Stage 4: PATCH ───────────────────────────────────────────────────
         // Enrich the task description with the hypothesis for the patch stage.
@@ -485,6 +499,7 @@ Brief summary of the proposed approach.
         StageKind::Patch => "\
 ## Output format — follow this exactly
 
+To fix or replace a single function:
 <FILE_EDITS>
 <EDIT path=\"src/lib.rs\" mode=\"replace_function:broken_fn\">
 fn broken_fn() -> i32 {
@@ -493,8 +508,23 @@ fn broken_fn() -> i32 {
 </EDIT>
 </FILE_EDITS>
 
+To add methods to a class or rewrite a whole file, use replace mode with the COMPLETE file content:
+<FILE_EDITS>
+<EDIT path=\"lib.py\" mode=\"replace\">
+class User:
+    def __init__(self, name):
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def get_email(self):
+        return self._email
+</EDIT>
+</FILE_EDITS>
+
 <FINAL_RESPONSE>
-Fixed broken_fn to return the correct value.
+Brief description of what was changed.
 </FINAL_RESPONSE>",
 
         StageKind::Report => "\
