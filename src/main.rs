@@ -1,4 +1,5 @@
 mod adapter;
+mod agent;
 mod batch;
 mod config;
 pub mod crp;
@@ -147,6 +148,18 @@ enum Command {
     ListSymbols {
         #[arg(help = "Relative file path")]
         file: String,
+    },
+    /// Run the kernel pipeline for a single task and emit events as newline-
+    /// delimited JSON on stdout. Designed to be spawned by editor extensions.
+    /// See docs/vscode-extension-plan.md for the full protocol spec.
+    #[command(about = "Run the kernel pipeline and stream events as JSON (editor extension IPC)")]
+    Agent {
+        #[arg(long, help = "Task description to run")]
+        task: String,
+        #[arg(long, help = "Workspace directory (overrides config)")]
+        workspace: Option<PathBuf>,
+        #[arg(long, help = "Save stage traces to this directory for dataset collection")]
+        traces_dir: Option<PathBuf>,
     },
     #[command(about = "Build and print a context pack for a task (kernel preview)")]
     Pack {
@@ -298,6 +311,11 @@ async fn main() -> Result<()> {
         let workspace = &config.harness.workspace;
         let out = kernel::read::list_symbols(workspace, &file)?;
         print!("{out}");
+        return Ok(());
+    }
+
+    if let Some(Command::Agent { task, workspace, traces_dir }) = args.command {
+        agent::run(config, task, workspace, traces_dir).await?;
         return Ok(());
     }
 
