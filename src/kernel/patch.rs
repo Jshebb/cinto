@@ -162,11 +162,20 @@ pub fn apply_directive(workspace: &Path, directive: &EditDirective) -> Result<St
         EditMode::ReplaceFunction(name) => {
             let original = fs::read_to_string(&path)
                 .with_context(|| format!("cannot read {}", directive.path))?;
-            let updated = replace_function_body(&original, name, &directive.content)
-                .ok_or_else(|| anyhow!("function '{}' not found in {}", name, directive.path))?;
-            fs::write(&path, &updated)
-                .with_context(|| format!("cannot write {}", directive.path))?;
-            Ok(format!("{}: replaced function '{name}'", directive.path))
+            match replace_function_body(&original, name, &directive.content) {
+                Some(updated) => {
+                    fs::write(&path, &updated)
+                        .with_context(|| format!("cannot write {}", directive.path))?;
+                    Ok(format!("{}: replaced function '{name}'", directive.path))
+                }
+                None => {
+                    // Function not found — the model is adding a new one, so append it.
+                    let updated = format!("{}\n\n{}", original.trim_end(), directive.content.trim_end());
+                    fs::write(&path, updated)
+                        .with_context(|| format!("cannot write {}", directive.path))?;
+                    Ok(format!("{}: added function '{name}' (appended — not found in file)", directive.path))
+                }
+            }
         }
 
         EditMode::Prepend => {
