@@ -228,14 +228,15 @@ impl WorkerLoop {
             Some(a) => format!("{task}\n\nApproach:\n{a}"),
             None => task.clone(),
         };
-        // Give the patch stage full file content — a model writing a `replace`
-        // edit must see the whole file or it will overwrite context it can't infer.
+        // Give the patch stage full file content so the model can write
+        // correct replace edits. Cap at 80 lines per file to avoid blowing
+        // out small context windows (e.g. 4096-token models in LM Studio).
         let patch_hints = ContextHints {
             files: locate_out.relevant_files.clone(),
             ranges: locate_out
                 .relevant_files
                 .iter()
-                .map(|f| (f.clone(), 1, 300))
+                .map(|f| (f.clone(), 1, 80))
                 .collect(),
             ..Default::default()
         };
