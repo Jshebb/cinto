@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cinto</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-foreground);
+      background: var(--vscode-sideBar-background);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Input area ─────────────────────────────────────────────────────── */
+    .input-area {
+      padding: 10px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, #333);
+      flex-shrink: 0;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 72px;
+      max-height: 160px;
+      resize: vertical;
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 3px;
+      padding: 6px 8px;
+      outline: none;
+      margin-bottom: 8px;
+    }
+
+    textarea:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+
+    textarea::placeholder {
+      color: var(--vscode-input-placeholderForeground);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    button {
+      flex: 1;
+      padding: 5px 10px;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: var(--vscode-font-size);
+      font-family: var(--vscode-font-family);
+    }
+
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    .btn-run {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .btn-run:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+
+    .btn-stop {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .btn-stop:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+
+    /* ── Output area ────────────────────────────────────────────────────── */
+    .output-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    /* ── Model badge ────────────────────────────────────────────────────── */
+    .model-badge {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 10px;
+    }
+
+    /* ── Stage list ─────────────────────────────────────────────────────── */
+    .stage-list {
+      list-style: none;
+      margin-bottom: 12px;
+    }
+
+    .stage-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 0;
+      font-size: 12px;
+    }
+
+    .stage-icon {
+      width: 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .stage-name { text-transform: capitalize; }
+
+    .stage-meta {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .stage-item.running .stage-icon  { animation: spin 1s linear infinite; display: inline-block; }
+    .stage-item.ok      .stage-icon  { color: var(--vscode-terminal-ansiGreen, #4ec9b0); }
+    .stage-item.warn    .stage-icon  { color: var(--vscode-terminal-ansiYellow, #dcdcaa); }
+    .stage-item.failed  .stage-icon  { color: var(--vscode-terminal-ansiRed, #f44747); }
+    .stage-item.skipped { opacity: 0.55; }
+
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ── Retry detail ───────────────────────────────────────────────────── */
+    .retry-detail {
+      font-size: 11px;
+      color: var(--vscode-terminal-ansiYellow, #dcdcaa);
+      padding: 2px 0 2px 20px;
+      word-break: break-word;
+    }
+
+    /* ── Final response ─────────────────────────────────────────────────── */
+    .final-response {
+      background: var(--vscode-editor-inactiveSelectionBackground, #2a2d2e);
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 8px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    .final-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Error banner ───────────────────────────────────────────────────── */
+    .error-banner {
+      background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+      border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      border-radius: 3px;
+      padding: 8px;
+      font-size: 12px;
+      margin-top: 8px;
+      word-break: break-word;
+    }
+
+    /* ── Patch approval modal ───────────────────────────────────────────── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .modal-overlay.visible { display: flex; }
+
+    .modal {
+      background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border, #444);
+      border-radius: 4px;
+      margin: auto 10px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .modal-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--vscode-panel-border, #444);
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .modal-path {
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      padding: 4px 12px;
+    }
+
+    .diff-view {
+      overflow-y: auto;
+      flex: 1;
+      padding: 8px 12px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+      white-space: pre;
+      overflow-x: auto;
+    }
+
+    .diff-add    { color: var(--vscode-terminal-ansiGreen, #4ec9b0); }
+    .diff-remove { color: var(--vscode-terminal-ansiRed, #f44747); }
+    .diff-hunk   { color: var(--vscode-terminal-ansiCyan, #4fc1ff); }
+
+    .modal-actions {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--vscode-panel-border, #444);
+    }
+
+    .btn-approve {
+      flex: 1;
+      background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+      color: #000;
+      font-weight: 600;
+    }
+
+    .btn-reject {
+      flex: 1;
+      background: var(--vscode-terminal-ansiRed, #f44747);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    /* ── Utility ────────────────────────────────────────────────────────── */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ── Input ────────────────────────────────────────────────────────────── -->
+<div class="input-area">
+  <textarea
+    id="taskInput"
+    placeholder="Describe the task… e.g. 'Fix the off-by-one in find_max'"
+    rows="3"
+  ></textarea>
+  <div class="btn-row">
+    <button id="btnRun" class="btn-run">Run</button>
+    <button id="btnStop" class="btn-stop" disabled>Stop</button>
+  </div>
+</div>
+
+<!-- ── Output ───────────────────────────────────────────────────────────── -->
+<div class="output-area" id="outputArea">
+  <div class="model-badge hidden" id="modelBadge"></div>
+  <ul class="stage-list" id="stageList"></ul>
+  <div id="finalBlock" class="hidden">
+    <div class="final-label">Result</div>
+    <div class="final-response" id="finalText"></div>
+  </div>
+  <div class="error-banner hidden" id="errorBanner"></div>
+</div>
+
+<!-- ── Patch approval modal ─────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-header">Apply this change?</div>
+    <div class="modal-path" id="modalPath"></div>
+    <div class="diff-view" id="diffView"></div>
+    <div class="modal-actions">
+      <button class="btn-approve" id="btnApprove">Approve</button>
+      <button class="btn-reject"  id="btnReject">Reject</button>
+    </div>
+  </div>
+</div>
+
+<script nonce="{{nonce}}">
+  const vscode = acquireVsCodeApi();
+
+  // ── Elements ──────────────────────────────────────────────────────────────
+  const taskInput  = document.getElementById('taskInput');
+  const btnRun     = document.getElementById('btnRun');
+  const btnStop    = document.getElementById('btnStop');
+  const outputArea = document.getElementById('outputArea');
+  const stageList  = document.getElementById('stageList');
+  const modelBadge = document.getElementById('modelBadge');
+  const finalBlock = document.getElementById('finalBlock');
+  const finalText  = document.getElementById('finalText');
+  const errorBanner= document.getElementById('errorBanner');
+
+  const modalOverlay = document.getElementById('modalOverlay');
+  const modalPath    = document.getElementById('modalPath');
+  const diffView     = document.getElementById('diffView');
+  const btnApprove   = document.getElementById('btnApprove');
+  const btnReject    = document.getElementById('btnReject');
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let pendingApprovalId = null;
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const STAGE_LABELS = {
+    interpret:    'Interpret',
+    locate:       'Locate files',
+    hypothesize:  'Hypothesize',
+    patch:        'Patch',
+    report:       'Report',
+  };
+
+  function stageLabel(stage) {
+    return STAGE_LABELS[stage] || stage;
+  }
+
+  function getOrCreateStageItem(stage) {
+    let item = document.getElementById('stage-' + stage);
+    if (!item) {
+      item = document.createElement('li');
+      item.id = 'stage-' + stage;
+      item.className = 'stage-item running';
+      item.innerHTML =
+        '<span class="stage-icon">↻</span>' +
+        '<span class="stage-name">' + stageLabel(stage) + '</span>' +
+        '<span class="stage-meta" id="stage-meta-' + stage + '"></span>';
+      stageList.appendChild(item);
+    }
+    return item;
+  }
+
+  function setRunning(running) {
+    btnRun.disabled  = running;
+    btnStop.disabled = !running;
+    taskInput.disabled = running;
+  }
+
+  function showError(msg) {
+    errorBanner.textContent = msg;
+    errorBanner.classList.remove('hidden');
+  }
+
+  function renderDiff(preview) {
+    // Render unified diff with basic line coloring.
+    const lines = preview.split('\n');
+    diffView.innerHTML = lines.map(line => {
+      let cls = '';
+      if (line.startsWith('+') && !line.startsWith('+++')) cls = 'diff-add';
+      else if (line.startsWith('-') && !line.startsWith('---')) cls = 'diff-remove';
+      else if (line.startsWith('@@')) cls = 'diff-hunk';
+      const escaped = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
+    }).join('\n');
+  }
+
+  // ── Run / Stop ────────────────────────────────────────────────────────────
+  btnRun.addEventListener('click', () => {
+    const task = taskInput.value.trim();
+    if (!task) { taskInput.focus(); return; }
+    vscode.postMessage({ command: 'run', task });
+  });
+
+  btnStop.addEventListener('click', () => {
+    vscode.postMessage({ command: 'stop' });
+  });
+
+  taskInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      btnRun.click();
+    }
+  });
+
+  // ── Approval buttons ──────────────────────────────────────────────────────
+  btnApprove.addEventListener('click', () => {
+    if (!pendingApprovalId) return;
+    vscode.postMessage({ command: 'approve', id: pendingApprovalId, approved: true });
+    modalOverlay.classList.remove('visible');
+    pendingApprovalId = null;
+  });
+
+  btnReject.addEventListener('click', () => {
+    if (!pendingApprovalId) return;
+    vscode.postMessage({ command: 'approve', id: pendingApprovalId, approved: false });
+    modalOverlay.classList.remove('visible');
+    pendingApprovalId = null;
+  });
+
+  // ── Messages from extension host ──────────────────────────────────────────
+  window.addEventListener('message', e => {
+    const msg = e.data;
+    switch (msg.type) {
+
+      case 'reset':
+        stageList.innerHTML = '';
+        modelBadge.classList.add('hidden');
+        finalBlock.classList.add('hidden');
+        errorBanner.classList.add('hidden');
+        modalOverlay.classList.remove('visible');
+        pendingApprovalId = null;
+        setRunning(true);
+        outputArea.scrollTop = 0;
+        break;
+
+      case 'focus_input':
+        taskInput.focus();
+        break;
+
+      case 'kernel_ready':
+        modelBadge.textContent = msg.model + ' · ' + (msg.context_budget / 1000).toFixed(0) + 'k ctx';
+        modelBadge.classList.remove('hidden');
+        break;
+
+      case 'stage_started': {
+        const item = getOrCreateStageItem(msg.stage);
+        item.className = 'stage-item running';
+        item.querySelector('.stage-icon').textContent = '↻';
+        break;
+      }
+
+      case 'stage_completed': {
+        const item = getOrCreateStageItem(msg.stage);
+        if (msg.crp_valid) {
+          item.className = 'stage-item ok';
+          item.querySelector('.stage-icon').textContent = '✓';
+        } else {
+          item.className = 'stage-item warn';
+          item.querySelector('.stage-icon').textContent = '~';
+          document.getElementById('stage-meta-' + msg.stage).textContent = 'plain text';
+        }
+        break;
+      }
+
+      case 'stage_retry': {
+        const item = getOrCreateStageItem(msg.stage);
+        item.className = 'stage-item warn';
+        item.querySelector('.stage-icon').textContent = '↻';
+        document.getElementById('stage-meta-' + msg.stage).textContent = 'retry ' + msg.attempt;
+        // Append retry detail row.
+        const detail = document.createElement('li');
+        detail.className = 'retry-detail';
+        detail.textContent = '⚠ ' + msg.reason;
+        stageList.insertBefore(detail, item.nextSibling);
+        break;
+      }
+
+      case 'stage_failed': {
+        const item = getOrCreateStageItem(msg.stage);
+        item.className = 'stage-item failed';
+        item.querySelector('.stage-icon').textContent = '✗';
+        document.getElementById('stage-meta-' + msg.stage).textContent = 'failed';
+        break;
+      }
+
+      case 'stage_skipped': {
+        const item = getOrCreateStageItem(msg.stage);
+        item.className = 'stage-item skipped';
+        item.querySelector('.stage-icon').textContent = '–';
+        document.getElementById('stage-meta-' + msg.stage).textContent = 'skipped';
+        break;
+      }
+
+      case 'patch_approval_requested':
+        pendingApprovalId = msg.id;
+        modalPath.textContent = msg.path;
+        renderDiff(msg.preview);
+        modalOverlay.classList.add('visible');
+        break;
+
+      case 'patch_applied': {
+        const files = msg.files_changed.join(', ');
+        const note = document.createElement('li');
+        note.className = 'stage-item ok';
+        note.innerHTML = '<span class="stage-icon">✎</span><span class="stage-name">Patched: ' + escHtml(files) + '</span>';
+        stageList.appendChild(note);
+        break;
+      }
+
+      case 'workflow_complete':
+        finalText.textContent = msg.final_response;
+        finalBlock.classList.remove('hidden');
+        setRunning(false);
+        finalBlock.scrollIntoView({ behavior: 'smooth' });
+        break;
+
+      case 'workflow_failed':
+        showError('Pipeline failed: ' + msg.error);
+        setRunning(false);
+        break;
+
+      case 'error':
+        showError(msg.message);
+        break;
+
+      case 'agent_exited':
+        setRunning(false);
+        break;
+
+      case 'agent_stopped':
+        setRunning(false);
+        break;
+    }
+  });
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Signal to the extension host that the webview is ready.
+  vscode.postMessage({ command: 'ready' });
+</script>
+</body>
+</html>

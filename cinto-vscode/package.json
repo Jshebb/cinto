@@ -1,0 +1,75 @@
+{
+  "name": "cinto",
+  "displayName": "Cinto",
+  "description": "Local AI coding agent — runs small models reliably on your machine",
+  "version": "0.1.0",
+  "publisher": "cinto",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Programming Languages"],
+  "keywords": ["ai", "local", "agent", "ollama", "lm-studio", "coding"],
+  "icon": "media/cinto-icon.png",
+  "activationEvents": ["onView:cinto.sidebar"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cinto-sidebar",
+          "title": "Cinto",
+          "icon": "media/cinto.svg"
+        }
+      ]
+    },
+    "views": {
+      "cinto-sidebar": [
+        {
+          "type": "webview",
+          "id": "cinto.sidebar",
+          "name": "Cinto",
+          "icon": "media/cinto.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cinto.runTask",
+        "title": "Cinto: Run Task"
+      },
+      {
+        "command": "cinto.stopTask",
+        "title": "Cinto: Stop Current Task"
+      }
+    ],
+    "configuration": {
+      "title": "Cinto",
+      "properties": {
+        "cinto.binaryPath": {
+          "type": "string",
+          "default": "cinto",
+          "description": "Path to the cinto binary. Defaults to 'cinto' (must be on PATH)."
+        },
+        "cinto.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to cinto.toml config file. Defaults to ~/.config/cinto/config.toml."
+        },
+        "cinto.tracesDir": {
+          "type": "string",
+          "default": "",
+          "description": "Directory to save stage traces for CintoLM dataset collection. Leave empty to disable."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
