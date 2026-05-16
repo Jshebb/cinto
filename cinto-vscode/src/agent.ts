@@ -14,6 +14,7 @@ export type KernelEvent =
   | { type: "stage_skipped"; stage: string; reason: string }
   | { type: "context_pack_ready"; stage: string; chars_used: number; budget: number }
   | { type: "patch_approval_requested"; id: string; path: string; preview: string }
+  | { type: "stage_output"; stage: string; search_terms: string[]; relevant_files: string[]; approach: string | null; summary: string | null }
   | { type: "patch_applied"; files_changed: string[] }
   | { type: "workflow_complete"; final_response: string }
   | { type: "workflow_failed"; error: string }

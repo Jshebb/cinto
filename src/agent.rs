@@ -146,6 +146,17 @@ pub async fn run(mut config: Config, task: String, workspace_override: Option<Pa
                 }));
             }
 
+            WorkerEvent::StageOutput { stage, search_terms, relevant_files, approach, summary } => {
+                emit(serde_json::json!({
+                    "type": "stage_output",
+                    "stage": stage,
+                    "search_terms": search_terms,
+                    "relevant_files": relevant_files,
+                    "approach": approach,
+                    "summary": summary,
+                }));
+            }
+
             WorkerEvent::StageSkipped { stage, reason } => {
                 emit(serde_json::json!({
                     "type": "stage_skipped",

@@ -648,6 +648,7 @@ pub async fn run_kernel(
                 WorkerEvent::StageSkipped { stage, reason } => {
                     errors.push(format!("{stage} skipped: {reason}"));
                 }
+                WorkerEvent::StageOutput { .. } => {}
                 WorkerEvent::StageTrace {
                     stage,
                     attempt,

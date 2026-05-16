@@ -73,6 +73,14 @@ pub enum WorkerEvent {
     ContextPackReady { stage: String, chars_used: usize, budget: usize },
     WorkflowComplete { final_response: String },
     WorkflowFailed { error: String },
+    /// Rich structured content of a completed stage, for UI display.
+    StageOutput {
+        stage: String,
+        search_terms: Vec<String>,
+        relevant_files: Vec<String>,
+        approach: Option<String>,
+        summary: Option<String>,
+    },
     PatchApprovalRequested {
         path: String,
         preview: String,
@@ -146,6 +154,13 @@ impl WorkerLoop {
             stage: StageKind::Interpret.label().into(),
             crp_valid: interpret_out.crp_valid,
         });
+        self.emit(WorkerEvent::StageOutput {
+            stage: StageKind::Interpret.label().into(),
+            search_terms: interpret_out.search_terms.clone(),
+            relevant_files: vec![],
+            approach: None,
+            summary: None,
+        });
 
         // ── Pipeline: load index concurrently while we continue ─────────────
         // The index load is I/O — we spawn it so stage 2's pack is ready faster.
@@ -176,6 +191,13 @@ impl WorkerLoop {
                 self.emit(WorkerEvent::StageCompleted {
                     stage: StageKind::Locate.label().into(),
                     crp_valid: out.crp_valid,
+                });
+                self.emit(WorkerEvent::StageOutput {
+                    stage: StageKind::Locate.label().into(),
+                    search_terms: vec![],
+                    relevant_files: out.relevant_files.clone(),
+                    approach: None,
+                    summary: None,
                 });
                 out
             }
@@ -229,6 +251,13 @@ impl WorkerLoop {
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Hypothesize.label().into(),
             crp_valid: hyp_out.crp_valid,
+        });
+        self.emit(WorkerEvent::StageOutput {
+            stage: StageKind::Hypothesize.label().into(),
+            search_terms: vec![],
+            relevant_files: vec![],
+            approach: hyp_out.approach.clone(),
+            summary: None,
         });
 
         // Save the approach to local memory for future runs.
@@ -322,6 +351,13 @@ impl WorkerLoop {
         self.emit(WorkerEvent::StageCompleted {
             stage: StageKind::Report.label().into(),
             crp_valid: report_out.crp_valid,
+        });
+        self.emit(WorkerEvent::StageOutput {
+            stage: StageKind::Report.label().into(),
+            search_terms: vec![],
+            relevant_files: vec![],
+            approach: None,
+            summary: report_out.final_response.clone(),
         });
 
         let final_response = report_out

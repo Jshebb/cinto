@@ -21,6 +21,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
   private view?: vscode.WebviewView;
   private agent = new AgentProcess();
   private readonly context: vscode.ExtensionContext;
+  private currentWorkspace = "";
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -41,7 +42,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
     webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => {
       switch (msg.command) {
         case "ready":
-          // Webview is loaded — nothing to restore for phase 1.
           break;
         case "run":
           this.runTask(msg.task);
@@ -50,12 +50,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
           this.stopTask();
           break;
         case "approve":
-          this.agent.sendApproval(msg.id, msg.approved);
+          this.handleApproval(msg.id, msg.approved);
           break;
       }
     });
 
-    // Clean up when the view is disposed.
     webviewView.onDidDispose(() => {
       this.agent.kill();
       this.view = undefined;
@@ -65,7 +64,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
   // ---------------------------------------------------------------------------
 
   focusAndPromptTask(): void {
-    // Reveal the sidebar and tell the webview to focus the task input.
     this.view?.show(true);
     this.post({ type: "focus_input" });
   }
@@ -81,21 +79,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
 
   // ---------------------------------------------------------------------------
 
+  private handleApproval(id: string, approved: boolean): void {
+    this.agent.sendApproval(id, approved);
+
+    // Close any diff editor tab we opened for this review.
+    for (const tab of vscode.window.tabGroups.all.flatMap(g => g.tabs)) {
+      if (tab.label.startsWith("Review: ")) {
+        void vscode.window.tabGroups.close(tab);
+        break;
+      }
+    }
+  }
+
   private runTask(task: string): void {
     if (!task.trim()) return;
+
+    // Remove stale listeners from any previous run.
+    this.agent.removeAllListeners();
 
     const cfg = vscode.workspace.getConfiguration("cinto");
     const binaryPath: string = cfg.get("binaryPath") || "cinto";
     const configPath: string = cfg.get("configPath") || "";
     const tracesDir: string = cfg.get("tracesDir") || "";
 
-    const workspace =
+    this.currentWorkspace =
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-    // Reset UI before starting.
     this.post({ type: "reset" });
 
     this.agent.on("kernel_event", (event: KernelEvent) => {
+      // Intercept patch approvals to also open the file in the editor.
+      if (event.type === "patch_approval_requested") {
+        this.openFileForReview(event.path);
+      }
       this.post(event);
     });
 
@@ -105,11 +121,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
 
     this.agent.spawn(
       task,
-      workspace,
+      this.currentWorkspace,
       binaryPath,
       configPath || undefined,
       tracesDir || undefined
     );
+  }
+
+  /** Open the file being patched in the editor so the user has context. */
+  private openFileForReview(relativePath: string): void {
+    const fullPath = path.join(this.currentWorkspace, relativePath);
+    if (!fs.existsSync(fullPath)) return;
+
+    const uri = vscode.Uri.file(fullPath);
+    void vscode.window.showTextDocument(uri, {
+      viewColumn: vscode.ViewColumn.One,
+      preserveFocus: true, // don't steal focus from the sidebar
+      preview: true,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -124,13 +153,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
 
     let html = fs.readFileSync(htmlPath, "utf8");
 
-    // Replace the nonce placeholder and CSP.
     const nonce = getNonce();
     html = html.replace(/\{\{nonce\}\}/g, nonce);
-    html = html.replace(
-      /\{\{cspSource\}\}/g,
-      webview.cspSource
-    );
+    html = html.replace(/\{\{cspSource\}\}/g, webview.cspSource);
 
     return html;
   }
@@ -138,10 +163,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, vscode.Dispo
 
 function getNonce(): string {
   let text = "";
-  const possible =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   for (let i = 0; i < 32; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
+    text += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return text;
 }

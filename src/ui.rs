@@ -614,6 +614,7 @@ impl App {
                 ));
             }
             WorkerEvent::StageTrace { .. } => {}
+            WorkerEvent::StageOutput { .. } => {}
         }
     }
 
